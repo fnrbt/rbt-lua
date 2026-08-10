@@ -1,0 +1,25 @@
+FsLua backends vs C Lua 5.4 (and MoonSharp) — best of 3, ms (lower=faster)
+
+benchmark                    tree      stack        reg       clua       moon   reg vs clua
+-------------------------------------------------------------------------------------------
+fib(33)                    1219.6      856.8      317.3      109.9     1474.5         0.35x
+loop sum 1..30M             944.8      592.8      177.3       68.7     1482.5         0.39x
+nested loop 6000^2         1113.3      690.0      304.5       82.9     1656.1         0.27x
+ackermann(3,8)              855.4      482.5      253.0       25.1      453.5         0.10x
+table fill+sum 3M           321.3      188.3      120.7       49.8     1665.8         0.41x
+string concat 300k           27.5       20.1       19.5       27.7      181.7         1.42x
+sieve 2M                    827.1      498.0      373.4       65.9     8982.5         0.18x
+OOP vectors 1M              660.8      533.5      413.3       75.7      654.0         0.18x
+-------------------------------------------------------------------------------------------
+TOTAL                      5969.8     3861.9     1979.0      505.9    16550.7         0.26x
+
+Allocation per run (MB), in-process engines:
+benchmark                    tree      stack        reg       moon
+fib(33)                    2189.9     5201.1        0.0     7393.5
+loop sum 1..30M               0.0        0.0        0.0     5762.5
+nested loop 6000^2            0.0        0.0        0.0     5187.7
+ackermann(3,8)             1058.7     1861.2        0.0     2365.1
+table fill+sum 3M           201.4      201.4      201.4     1935.0
+string concat 300k           44.4       44.4       44.4      128.0
+sieve 2M                    342.4      335.3      335.3     3101.4
+OOP vectors 1M             1440.0     1688.1      480.1     2746.6

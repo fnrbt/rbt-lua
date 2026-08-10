@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
+    <Tailcalls Condition="'$(Configuration)' == 'Release'">true</Tailcalls>
+    <WarningLevel>3</WarningLevel>
+    <NoWarn>FS0064;FS3370</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Value.fs" />
+    <Compile Include="Numbers.fs" />
+    <Compile Include="Ast.fs" />
+    <Compile Include="Lexer.fs" />
+    <Compile Include="Parser.fs" />
+    <Compile Include="Compiler.fs" />
+    <Compile Include="Interp.fs" />
+    <Compile Include="StackVM.fs" />
+    <Compile Include="RegVM.fs" />
+    <Compile Include="Pattern.fs" />
+    <Compile Include="Format.fs" />
+    <Compile Include="Host.fs" />
+    <Compile Include="StdLib.fs" />
+    <Compile Include="Lua.fs" />
+  </ItemGroup>
+
+</Project>
