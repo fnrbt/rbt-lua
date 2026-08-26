@@ -1,7 +1,7 @@
-module FsLua.Cli.Program
+module Rbt.Lua.Cli.Program
 
 open System
-open FsLua
+open Rbt.Lua
 
 let private runSource (src: string) (name: string) (backend: string) =
     let lua = Lua()

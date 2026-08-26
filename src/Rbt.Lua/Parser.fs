@@ -1,4 +1,4 @@
-namespace FsLua
+namespace Rbt.Lua
 
 /// Recursive-descent parser with precedence climbing for expressions.
 module Parser =

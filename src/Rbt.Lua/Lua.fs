@@ -1,4 +1,4 @@
-namespace FsLua
+namespace Rbt.Lua
 
 /// Public entry point: a Lua state with the standard library installed.
 [<Sealed>]

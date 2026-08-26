@@ -10,7 +10,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsLua\FsLua.fsproj" />
+    <ProjectReference Include="..\..\src\Rbt.Lua\Rbt.Lua.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+    <PackageReference Include="MoonSharp" Version="2.0.0" />
   </ItemGroup>
 
 </Project>

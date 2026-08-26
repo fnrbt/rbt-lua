@@ -130,17 +130,17 @@ byte-accurate non-ASCII strings.)
 dotnet build -c Release
 
 # pick a backend (default is the tree-walker)
-dotnet run --project src/FsLua.Cli -c Release -- --tree  script.lua
-dotnet run --project src/FsLua.Cli -c Release -- --stack script.lua
-dotnet run --project src/FsLua.Cli -c Release -- --reg   script.lua
-dotnet run --project src/FsLua.Cli -c Release -- -e "print(1+2)"
+dotnet run --project src/Rbt.Lua.Cli -c Release -- --tree  script.lua
+dotnet run --project src/Rbt.Lua.Cli -c Release -- --stack script.lua
+dotnet run --project src/Rbt.Lua.Cli -c Release -- --reg   script.lua
+dotnet run --project src/Rbt.Lua.Cli -c Release -- -e "print(1+2)"
 
 # benchmarks (argument = repetitions, best-of)
-dotnet run --project bench/FsLua.Benchmarks -c Release -- 3
+dotnet run --project bench/Rbt.Lua.Benchmarks -c Release -- 3
 ```
 
 ```fsharp
-open FsLua
+open Rbt.Lua
 let lua = Lua()
 lua.DoString    "print('hi')"   // tree-walker
 lua.DoStringReg "print('hi')"   // register VM

@@ -1,4 +1,4 @@
-namespace FsLua
+namespace Rbt.Lua
 
 open System
 open System.Globalization

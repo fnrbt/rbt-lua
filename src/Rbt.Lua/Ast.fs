@@ -1,4 +1,4 @@
-namespace FsLua
+namespace Rbt.Lua
 
 /// Unary operators.
 type UnOp =

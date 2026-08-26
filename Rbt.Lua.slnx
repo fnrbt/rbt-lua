@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/Rbt.Lua.Benchmarks/Rbt.Lua.Benchmarks.fsproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Rbt.Lua.Cli/Rbt.Lua.Cli.fsproj" />
+    <Project Path="src/Rbt.Lua/Rbt.Lua.fsproj" />
+  </Folder>
+</Solution>

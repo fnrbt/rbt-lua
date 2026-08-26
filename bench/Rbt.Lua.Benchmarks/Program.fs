@@ -1,8 +1,8 @@
-module FsLua.Benchmarks.Program
+module Rbt.Lua.Benchmarks.Program
 
 open System
 open System.Diagnostics
-open FsLua
+open Rbt.Lua
 open MoonSharp.Interpreter
 
 // Each benchmark: a name and a Lua chunk that returns a single result.
@@ -38,7 +38,7 @@ let private measure reps (f: unit -> string) : float * string =
         best <- min best sw.Elapsed.TotalMilliseconds
     best, result
 
-let private runFsLua backend code () : string =
+let private runRbtLua backend code () : string =
     let lua = Lua()
     let r =
         match backend with
@@ -96,9 +96,9 @@ let main argv =
         match en with
         | "clua" -> runClua reps code
         | "moon" -> measure reps (runMoon code)
-        | "stack" | "reg" | "tree" -> measure reps (runFsLua en code)
+        | "stack" | "reg" | "tree" -> measure reps (runRbtLua en code)
         | _ -> nan, ""
-    printfn "FsLua backends vs C Lua 5.4 (and MoonSharp) — best of %d, ms (lower=faster)\n" reps
+    printfn "Rbt.Lua backends vs C Lua 5.4 (and MoonSharp) — best of %d, ms (lower=faster)\n" reps
     let col = 10
     printf "%-22s" "benchmark"
     for e in engines do printf " %*s" col e
@@ -132,6 +132,6 @@ let main argv =
                     float (GC.GetTotalAllocatedBytes true - b) / 1e6
                 with _ -> nan
             printfn "%-22s %10.1f %10.1f %10.1f %10.1f" name
-                (alloc (runFsLua "tree" code)) (alloc (runFsLua "stack" code))
-                (alloc (runFsLua "reg" code)) (if withMoon then alloc (runMoon code) else nan)
+                (alloc (runRbtLua "tree" code)) (alloc (runRbtLua "stack" code))
+                (alloc (runRbtLua "reg" code)) (if withMoon then alloc (runMoon code) else nan)
     0
