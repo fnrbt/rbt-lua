@@ -128,6 +128,7 @@ module StdLib =
                 r
             with
             | :? LuaError as e -> [| Value.False; e.Value |]
+            | :? OperationCanceledException -> reraise()
             | e -> [| Value.False; Value.str e.Message |])
 
         reg "xpcall" (fun a ->
@@ -141,6 +142,7 @@ module StdLib =
                 r
             with
             | :? LuaError as e -> [| Value.False; interp.Call(handler, [| e.Value |]) |> (fun x -> if x.Length > 0 then x.[0] else Value.Nil) |]
+            | :? OperationCanceledException -> reraise()
             | e -> [| Value.False; interp.Call(handler, [| Value.str e.Message |]) |> (fun x -> if x.Length > 0 then x.[0] else Value.Nil) |])
 
         def "select" (lua {

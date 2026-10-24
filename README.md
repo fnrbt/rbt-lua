@@ -113,6 +113,12 @@ source ──▶ Lexer ──▶ Parser ──▶ Compiler (name resolution)
   `Interp.CallAsync`; when the top-level callee is a Lua closure, the tree-walker
   runs that closure in async mode so nested async host calls from ordinary Lua
   code can be awaited. Synchronous `Interp.Call` still rejects async host calls.
+* **Cancellation** — `Interp.CallAsync` and the cancellation-token overload of
+  `Interp.Call` stop CPU-only Lua in the tree, stack and register backends.
+  Dispatch checks are bounded and cancellation crosses nested calls and
+  `pcall`/`xpcall`; protected Lua cannot turn it into an ordinary error result.
+  A cancelled register execution restores its frame window, so the interpreter
+  can be reused on the same thread.
 
 ## Language coverage
 

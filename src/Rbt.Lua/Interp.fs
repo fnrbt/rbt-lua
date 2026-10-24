@@ -125,6 +125,22 @@ and [<Sealed>] AsyncBuiltin(name: string, fn: Interp -> Value[] -> CancellationT
 and [<Sealed>] Interp() =
     let globals = LuaTable()
     let stringMeta = LuaTable()   // metatable shared by all strings; __index = string library
+    // The async entry point supplies the token for synchronous nested calls
+    // (metamethods, pcall, iterator functions) as well as async Lua frames.
+    // A single cheap counter covers VM statements and empty loop iterations;
+    // only every 1024th dispatch reads the ambient token.
+    let cancellation = AsyncLocal<CancellationToken>()
+    let mutable dispatches = 0
+
+    member internal _.Dispatch() =
+        dispatches <- dispatches + 1
+        if dispatches &&& 1023 = 0 then
+            cancellation.Value.ThrowIfCancellationRequested()
+
+    member internal _.Dispatch(ct: CancellationToken) =
+        dispatches <- dispatches + 1
+        if dispatches &&& 1023 = 0 then
+            ct.ThrowIfCancellationRequested()
 
     member _.Globals = globals
     member _.StringMeta = stringMeta
@@ -182,41 +198,67 @@ and [<Sealed>] Interp() =
 
     // ---- calling ----------------------------------------------------------
 
-    member this.Call(f: Value, args: Value[]) : Value[] =
-        match f.Tag with
-        | Tag.Func ->
-            match f.Obj with
-            | :? ICallable as c -> c.Invoke(this, args)
-            | _ -> luaError "attempt to call a non-function"
-        | _ ->
-            let h = this.MetaField(f, mCall)
-            if h.IsNil then luaError (sprintf "attempt to call a %s value" (Value.typeName f))
-            else
-                let a2 = Array.zeroCreate (args.Length + 1)
-                a2.[0] <- f
-                Array.blit args 0 a2 1 args.Length
-                this.Call(h, a2)
+    member this.Call(f: Value, args: Value[], ?ct: CancellationToken) : Value[] =
+        let previous = cancellation.Value
+        let requested = defaultArg ct previous
+        let changed = requested.CanBeCanceled && requested <> previous
+        let effective = if changed then requested else previous
+        if changed then cancellation.Value <- requested
+        try
+            effective.ThrowIfCancellationRequested()
+            let result =
+                match f.Tag with
+                | Tag.Func ->
+                    match f.Obj with
+                    | :? ICallable as c -> c.Invoke(this, args)
+                    | _ -> luaError "attempt to call a non-function"
+                | _ ->
+                    let h = this.MetaField(f, mCall)
+                    if h.IsNil then luaError (sprintf "attempt to call a %s value" (Value.typeName f))
+                    else
+                        let a2 = Array.zeroCreate (args.Length + 1)
+                        a2.[0] <- f
+                        Array.blit args 0 a2 1 args.Length
+                        this.Call(h, a2)
+            effective.ThrowIfCancellationRequested()
+            result
+        finally
+            if changed then cancellation.Value <- previous
 
     member this.CallAsync(f: Value, args: Value[], ?ct: CancellationToken) : Task<Value[]> = task {
-        let ct = defaultArg ct CancellationToken.None
-        match f.Tag with
-        | Tag.Func ->
-            match f.Obj with
-            | :? IAsyncCallable as c ->
-                return! c.InvokeAsync(this, args, ct)
-            | :? ICallable as c ->
-                return c.Invoke(this, args)
+        let previous = cancellation.Value
+        let requested = defaultArg ct previous
+        let changed = requested.CanBeCanceled && requested <> previous
+        let effective = if changed then requested else previous
+        if changed then cancellation.Value <- requested
+        try
+            effective.ThrowIfCancellationRequested()
+            match f.Tag with
+            | Tag.Func ->
+                match f.Obj with
+                | :? IAsyncCallable as c ->
+                    let! result = c.InvokeAsync(this, args, effective)
+                    effective.ThrowIfCancellationRequested()
+                    return result
+                | :? ICallable as c ->
+                    let result = c.Invoke(this, args)
+                    effective.ThrowIfCancellationRequested()
+                    return result
+                | _ ->
+                    return luaError "attempt to call a non-function"
             | _ ->
-                return luaError "attempt to call a non-function"
-        | _ ->
-            let h = this.MetaField(f, mCall)
-            if h.IsNil then
-                return luaError (sprintf "attempt to call a %s value" (Value.typeName f))
-            else
-                let a2 = Array.zeroCreate (args.Length + 1)
-                a2.[0] <- f
-                Array.blit args 0 a2 1 args.Length
-                return! this.CallAsync(h, a2, ct)
+                let h = this.MetaField(f, mCall)
+                if h.IsNil then
+                    return luaError (sprintf "attempt to call a %s value" (Value.typeName f))
+                else
+                    let a2 = Array.zeroCreate (args.Length + 1)
+                    a2.[0] <- f
+                    Array.blit args 0 a2 1 args.Length
+                    let! result = this.CallAsync(h, a2, effective)
+                    effective.ThrowIfCancellationRequested()
+                    return result
+        finally
+            if changed then cancellation.Value <- previous
     }
 
     member this.CallClosure(c: Closure, args: Value[]) : Value[] =
@@ -236,20 +278,28 @@ and [<Sealed>] Interp() =
         | _ -> emptyValues
 
     member this.CallClosureAsync(c: Closure, args: Value[], ct: CancellationToken) : Task<Value[]> = task {
-        let p = c.Proto
-        let slots = if p.NumSlots > 0 then Array.zeroCreate p.NumSlots else emptyValues
-        let cells : Cell[] = if p.NumCells > 0 then Array.zeroCreate p.NumCells else emptyCells
-        let np = p.NumParams
-        for i in 0 .. np - 1 do
-            let v = if i < args.Length then args.[i] else Value.Nil
-            if p.ParamCells.[i] then cells.[p.ParamIndex.[i]] <- Cell v
-            else slots.[p.ParamIndex.[i]] <- v
-        let varargs =
-            if p.IsVararg && args.Length > np then args.[np..] else emptyValues
-        let frame = Frame(slots, cells, c.Upvals, varargs)
-        match! this.ExecBlockAsync(frame, p.Body, ct) with
-        | Return vs -> return vs
-        | _ -> return emptyValues
+        let previous = cancellation.Value
+        let changed = ct.CanBeCanceled && ct <> previous
+        let effective = if changed then ct else previous
+        if changed then cancellation.Value <- ct
+        try
+            effective.ThrowIfCancellationRequested()
+            let p = c.Proto
+            let slots = if p.NumSlots > 0 then Array.zeroCreate p.NumSlots else emptyValues
+            let cells : Cell[] = if p.NumCells > 0 then Array.zeroCreate p.NumCells else emptyCells
+            let np = p.NumParams
+            for i in 0 .. np - 1 do
+                let v = if i < args.Length then args.[i] else Value.Nil
+                if p.ParamCells.[i] then cells.[p.ParamIndex.[i]] <- Cell v
+                else slots.[p.ParamIndex.[i]] <- v
+            let varargs =
+                if p.IsVararg && args.Length > np then args.[np..] else emptyValues
+            let frame = Frame(slots, cells, c.Upvals, varargs)
+            match! this.ExecBlockAsync(frame, p.Body, effective) with
+            | Return vs -> return vs
+            | _ -> return emptyValues
+        finally
+            if changed then cancellation.Value <- previous
     }
 
     member this.MakeClosure(frame: Frame, proto: CProto) : Value =
@@ -459,6 +509,7 @@ and [<Sealed>] Interp() =
         let n = stats.Length
         let mutable running = true
         while running && i < n do
+            this.Dispatch()
             flow <- this.ExecStat(frame, stats.[i])
             (match flow with Normal -> () | _ -> running <- false)
             i <- i + 1
@@ -506,6 +557,7 @@ and [<Sealed>] Interp() =
             let mutable flow = Normal
             let mutable go = true
             while go && (this.EvalExpr(frame, c)).IsTruthy do
+                this.Dispatch()
                 match this.ExecBlock(frame, b) with
                 | Normal -> ()
                 | Break -> go <- false
@@ -515,6 +567,7 @@ and [<Sealed>] Interp() =
             let mutable flow = Normal
             let mutable go = true
             while go do
+                this.Dispatch()
                 match this.ExecBlock(frame, b) with
                 | Normal -> if (this.EvalExpr(frame, c)).IsTruthy then go <- false
                 | Break -> go <- false
@@ -537,6 +590,7 @@ and [<Sealed>] Interp() =
         let n = stats.Length
         let mutable running = true
         while running && i < n do
+            this.Dispatch(ct)
             let! next = this.ExecStatAsync(frame, stats.[i], ct)
             flow <- next
             match flow with Normal -> () | _ -> running <- false
@@ -597,6 +651,7 @@ and [<Sealed>] Interp() =
             let mutable flow = Normal
             let mutable go = true
             while go do
+                this.Dispatch(ct)
                 let! cv = this.EvalExprAsync(frame, c, ct)
                 if not cv.IsTruthy then
                     go <- false
@@ -611,6 +666,7 @@ and [<Sealed>] Interp() =
             let mutable flow = Normal
             let mutable go = true
             while go do
+                this.Dispatch(ct)
                 let! bodyFlow = this.ExecBlockAsync(frame, b, ct)
                 match bodyFlow with
                 | Normal ->
@@ -687,6 +743,7 @@ and [<Sealed>] Interp() =
                 let mutable flow = Normal
                 let mutable go = true
                 while go do
+                    this.Dispatch()
                     setVar (Value.int i)
                     match this.ExecBlock(frame, body) with
                     | Normal ->
@@ -707,6 +764,7 @@ and [<Sealed>] Interp() =
             let mutable flow = Normal
             let mutable go = true
             while go && ((step > 0.0 && i <= limit) || (step < 0.0 && i >= limit)) do
+                this.Dispatch()
                 setVar (Value.float i)
                 match this.ExecBlock(frame, body) with
                 | Normal -> i <- i + step
@@ -753,6 +811,7 @@ and [<Sealed>] Interp() =
                 let mutable flow = Normal
                 let mutable go = true
                 while go do
+                    this.Dispatch(ct)
                     setVar (Value.int i)
                     let! bodyFlow = this.ExecBlockAsync(frame, body, ct)
                     match bodyFlow with
@@ -774,6 +833,7 @@ and [<Sealed>] Interp() =
             let mutable flow = Normal
             let mutable go = true
             while go && ((step > 0.0 && i <= limit) || (step < 0.0 && i >= limit)) do
+                this.Dispatch(ct)
                 setVar (Value.float i)
                 let! bodyFlow = this.ExecBlockAsync(frame, body, ct)
                 match bodyFlow with
@@ -791,6 +851,7 @@ and [<Sealed>] Interp() =
         let mutable flow = Normal
         let mutable go = true
         while go do
+            this.Dispatch()
             let res = this.Call(f, [| s; ctrl |])
             let first = firstOrNil res
             if first.IsNil then go <- false
@@ -815,6 +876,7 @@ and [<Sealed>] Interp() =
         let mutable flow = Normal
         let mutable go = true
         while go do
+            this.Dispatch(ct)
             let! res = this.CallAsync(f, [| s; ctrl |], ct)
             let first = firstOrNil res
             if first.IsNil then

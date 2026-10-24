@@ -418,6 +418,7 @@ module StackVM =
 
 
             while running do
+                interp.Dispatch()
                 let instr = code.[ip]
                 ip <- ip + 1
                 match instr.Op with

@@ -462,6 +462,10 @@ module RegVM =
         [<DefaultValue; ThreadStatic>] static val mutable private Frames: RFrame[]
         [<DefaultValue; ThreadStatic>] static val mutable private Fp: int
 
+        static member internal RestoreFrame(savedTop: int, savedFp: int) =
+            RClosure.Top <- savedTop
+            RClosure.Fp <- savedFp
+
         static member Run(interp: Interp, cl: RClosure, args: Value[]) : Value[] =
             if isNull RClosure.Stack then
                 RClosure.Stack <- Array.zeroCreate 262144
@@ -469,6 +473,9 @@ module RegVM =
             let globals = interp.Globals
             let savedTop = RClosure.Top
             let entryFp = RClosure.Fp
+            // Unwind the thread-local register window even when cancellation
+            // interrupts a nested frame; the guard is a value type.
+            use _restore = FrameRestore(savedTop, entryFp)
             let mutable p = cl.Proto
             let mutable based = savedTop
             if based + p.NumReg > RClosure.Stack.Length then raise (LuaError(Value.str "stack overflow"))
@@ -494,6 +501,7 @@ module RegVM =
             let mutable running = true
 
             while running do
+                interp.Dispatch()
                 let instr = code.[ip]
                 ip <- ip + 1
                 let a = instr.A
@@ -712,8 +720,12 @@ module RegVM =
                         based <- fr.Base; ip <- fr.Ip; upvals <- fr.Upvals; cells <- fr.Cells; varargs <- fr.Varargs
                         regs <- RClosure.Stack.AsSpan(fr.Base)
                 | _ -> failwith "bad regvm opcode"
-            RClosure.Top <- savedTop
             result
+
+    and [<Struct>] private FrameRestore(savedTop: int, savedFp: int) =
+        interface System.IDisposable with
+            member _.Dispose() =
+                RClosure.RestoreFrame(savedTop, savedFp)
 
     /// Compile a top-level chunk prototype into a runnable closure.
     let compile (proto: CProto) : RClosure = RClosure(compileProto proto, emptyCells)
