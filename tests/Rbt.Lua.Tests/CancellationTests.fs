@@ -98,3 +98,24 @@ let ``a host returning after cancellation cannot turn the call into success`` ()
     Assert.ThrowsAny<OperationCanceledException>(fun () ->
         lua.Interp.CallAsync(fn, [||], cts.Token).GetAwaiter().GetResult() |> ignore)
     |> ignore
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``an explicit uncancelled token replaces a cancelled ambient token for a new call`` asynchronous =
+    let lua = Lua()
+    use cancellation = new CancellationTokenSource()
+    let followUp = compiled lua "return 42"
+    let mutable resumedResult = 0L
+    lua.SetGlobal("next_invocation", Host.make lua.Interp "next_invocation" (fun _ ->
+        cancellation.Cancel()
+        let values =
+            if asynchronous then
+                lua.Interp.CallAsync(followUp, [||], CancellationToken.None).GetAwaiter().GetResult()
+            else lua.Interp.Call(followUp, [||], CancellationToken.None)
+        resumedResult <- values.[0].Int
+        values))
+    Assert.ThrowsAny<OperationCanceledException>(fun () ->
+        lua.Interp.CallAsync(compiled lua "return next_invocation()", [||], cancellation.Token).GetAwaiter().GetResult() |> ignore)
+    |> ignore
+    Assert.Equal(42L, resumedResult)

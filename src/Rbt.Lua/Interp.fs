@@ -201,7 +201,7 @@ and [<Sealed>] Interp() =
     member this.Call(f: Value, args: Value[], ?ct: CancellationToken) : Value[] =
         let previous = cancellation.Value
         let requested = defaultArg ct previous
-        let changed = requested.CanBeCanceled && requested <> previous
+        let changed = requested <> previous
         let effective = if changed then requested else previous
         if changed then cancellation.Value <- requested
         try
@@ -228,7 +228,7 @@ and [<Sealed>] Interp() =
     member this.CallAsync(f: Value, args: Value[], ?ct: CancellationToken) : Task<Value[]> = task {
         let previous = cancellation.Value
         let requested = defaultArg ct previous
-        let changed = requested.CanBeCanceled && requested <> previous
+        let changed = requested <> previous
         let effective = if changed then requested else previous
         if changed then cancellation.Value <- requested
         try
@@ -279,7 +279,7 @@ and [<Sealed>] Interp() =
 
     member this.CallClosureAsync(c: Closure, args: Value[], ct: CancellationToken) : Task<Value[]> = task {
         let previous = cancellation.Value
-        let changed = ct.CanBeCanceled && ct <> previous
+        let changed = ct <> previous
         let effective = if changed then ct else previous
         if changed then cancellation.Value <- ct
         try
