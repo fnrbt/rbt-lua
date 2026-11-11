@@ -146,6 +146,37 @@ cancellation:
 dotnet test tests/Rbt.Lua.Tests -c Release
 ```
 
+## Pattern execution and remaining work
+
+Pattern matching uses an iterative backtracking machine, not the .NET call stack.
+Reusable choice frames retain repetition cursors; a capture undo log restores
+capture state when an alternative fails. Matching, scanning, and backtracking
+cooperate with interpreter cancellation. The Lua limit of 32 captures remains;
+deep optional patterns no longer depend on native stack depth.
+
+Verification: 51 regression tests pass, including deep matching and cancellation.
+A 24-case differential corpus matched Lua 5.4.9 on all three execution backends.
+
+Remaining items:
+
+* **Pattern work/memory limits:** removing host recursion does not remove
+  exponential backtracking or bound the explicit stack's heap usage. Cancellation
+  interrupts pathological matching, but calls without a cancellation token have
+  no work budget. A configurable work/frame budget needs a separate API and
+  compatibility decision; no arbitrary limit is imposed here.
+* **Quoted NUL escaping:** `string.format("%q", string.char(0) .. "123")`
+  currently emits `"\0123"`, which parses as byte 12 followed by `"3"`, not NUL
+  followed by `"123"`. Emit an unambiguous three-digit escape before a digit and
+  add a round-trip regression.
+* **String compatibility:** byte-accurate non-ASCII strings and Lua character-class
+  behavior remain incomplete; the pattern rewrite retains the current character
+  representation.
+* **Table traversal retention:** an abandoned traversal can retain deleted hash
+  cursors until a later traversal. Reclamation without invalidating permitted
+  deletion-during-iteration needs further design.
+* **Language coverage:** `<const>`/`<close>` remain explicitly rejected. Coroutines,
+  `goto`/labels, and full `_ENV` remain unsupported.
+
 ## Usage
 
 ```bash

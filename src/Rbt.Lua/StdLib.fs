@@ -320,16 +320,16 @@ module StdLib =
             let pat = checkStr 2 "find" a
             let init = int (optInt 3 "find" interp a 1L)
             let plain = (arg a 3).IsTruthy
-            LuaPattern.find s pat init plain)
+            LuaPattern.find interp.Dispatch s pat init plain)
         regIn strlib "match" (fun a ->
             let s = checkStr 1 "match" a
             let pat = checkStr 2 "match" a
             let init = int (optInt 3 "match" interp a 1L)
-            LuaPattern.matchOne s pat init)
+            LuaPattern.matchOne interp.Dispatch s pat init)
         regIn strlib "gmatch" (fun a ->
             let s = checkStr 1 "gmatch" a
             let pat = checkStr 2 "gmatch" a
-            let it = LuaPattern.gmatch s pat
+            let it = LuaPattern.gmatch interp.Dispatch s pat
             one (func "gmatch.iterator" (fun _ -> it ())))
         regIn strlib "gsub" (fun a ->
             let s = checkStr 1 "gsub" a
@@ -363,7 +363,7 @@ module StdLib =
                     let v = (interp.Call(repl, caps)) |> firstOrNil
                     if v.IsTruthy then ValueSome(Numbers.toString v) else ValueNone
                 | _ -> err "bad argument #3 to 'gsub' (string/function/table expected)"
-            let result, count = LuaPattern.gsub s pat maxN apply
+            let result, count = LuaPattern.gsub interp.Dispatch s pat maxN apply
             [| Value.str result; Value.int (int64 count) |])
 
         // ---- table --------------------------------------------------------
