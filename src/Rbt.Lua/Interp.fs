@@ -61,12 +61,34 @@ module Runtime =
         | _ -> "__add"
 
     let inline luaIDiv (a: int64) (b: int64) =
-        let q = a / b
-        if (a % b <> 0L) && ((a ^^^ b) < 0L) then q - 1L else q
+        if a = Int64.MinValue && b = -1L then Int64.MinValue
+        else
+            let q = a / b
+            if (a % b <> 0L) && ((a ^^^ b) < 0L) then q - 1L else q
 
     let inline luaIMod (a: int64) (b: int64) =
-        let r = a % b
-        if r <> 0L && ((r ^^^ b) < 0L) then r + b else r
+        if a = Int64.MinValue && b = -1L then 0L
+        else
+            let r = a % b
+            if r <> 0L && ((r ^^^ b) < 0L) then r + b else r
+
+    // Compare without rounding the integer to double. Conversion is safe only
+    // inside the signed 64-bit range; NaN is unordered.
+    let intLessFloat (i: int64) (f: double) =
+        if Double.IsNaN f then false
+        elif f >= 9223372036854775808.0 then true
+        elif f < -9223372036854775808.0 then false
+        else
+            let n = int64 f
+            i < n || (i = n && f > double n)
+
+    let intLessEqFloat (i: int64) (f: double) =
+        if Double.IsNaN f then false
+        elif f >= 9223372036854775808.0 then true
+        elif f < -9223372036854775808.0 then false
+        else
+            let n = int64 f
+            i < n || (i = n && f >= double n)
 
     let inline luaFMod (a: double) (b: double) =
         if Double.IsInfinity b then
@@ -532,13 +554,15 @@ and [<Sealed>] Interp() =
                 else frame.Slots.[lr.Index] <- v
             Normal
         | CSAssign(targets, exprs) ->
-            if targets.Length = 1 && exprs.Length = 1 then
-                this.AssignTo(frame, targets.[0], this.EvalExpr(frame, exprs.[0]))
-            else
-                let vals = this.EvalArgs(frame, exprs)
-                for i in 0 .. targets.Length - 1 do
-                    let v = if i < vals.Length then vals.[i] else Value.Nil
-                    this.AssignTo(frame, targets.[i], v)
+            let indices = targets |> Array.map (function
+                | TIndex(o, k) -> Some(this.EvalExpr(frame, o), this.EvalExpr(frame, k))
+                | _ -> None)
+            let vals = this.EvalArgs(frame, exprs)
+            for i in targets.Length - 1 .. -1 .. 0 do
+                let v = if i < vals.Length then vals.[i] else Value.Nil
+                match indices.[i] with
+                | Some(o, k) -> this.SetIndex(o, k, v)
+                | None -> this.AssignTo(frame, targets.[i], v)
             Normal
         | CSReturn exprs -> Return(this.EvalArgs(frame, exprs))
         | CSBreak -> Break
@@ -620,14 +644,20 @@ and [<Sealed>] Interp() =
                 else frame.Slots.[lr.Index] <- v
             return Normal
         | CSAssign(targets, exprs) ->
-            if targets.Length = 1 && exprs.Length = 1 then
-                let! value = this.EvalExprAsync(frame, exprs.[0], ct)
-                do! this.AssignToAsync(frame, targets.[0], value, ct)
-            else
-                let! vals = this.EvalArgsAsync(frame, exprs, ct)
-                for i in 0 .. targets.Length - 1 do
-                    let v = if i < vals.Length then vals.[i] else Value.Nil
-                    do! this.AssignToAsync(frame, targets.[i], v, ct)
+            let indices = Array.create targets.Length None
+            for i in 0 .. targets.Length - 1 do
+                match targets.[i] with
+                | TIndex(o, k) ->
+                    let! ov = this.EvalExprAsync(frame, o, ct)
+                    let! kv = this.EvalExprAsync(frame, k, ct)
+                    indices.[i] <- Some(ov, kv)
+                | _ -> ()
+            let! vals = this.EvalArgsAsync(frame, exprs, ct)
+            for i in targets.Length - 1 .. -1 .. 0 do
+                let v = if i < vals.Length then vals.[i] else Value.Nil
+                match indices.[i] with
+                | Some(o, k) -> this.SetIndex(o, k, v)
+                | None -> do! this.AssignToAsync(frame, targets.[i], v, ct)
             return Normal
         | CSReturn exprs ->
             let! vals = this.EvalArgsAsync(frame, exprs, ct)
@@ -1059,14 +1089,18 @@ and [<Sealed>] Interp() =
     member this.Less(a: Value, b: Value) : bool =
         match a.Tag, b.Tag with
         | Tag.Int, Tag.Int -> a.Int < b.Int
-        | (Tag.Int | Tag.Float), (Tag.Int | Tag.Float) -> this.ToFloat a < this.ToFloat b
+        | Tag.Int, Tag.Float -> intLessFloat a.Int b.Float
+        | Tag.Float, Tag.Int -> not (Double.IsNaN a.Float) && not (intLessEqFloat b.Int a.Float)
+        | Tag.Float, Tag.Float -> a.Float < b.Float
         | Tag.Str, Tag.Str -> String.CompareOrdinal(a.Obj :?> string, b.Obj :?> string) < 0
         | _ -> this.CmpMeta(mLt, a, b, "compare")
 
     member this.LessEq(a: Value, b: Value) : bool =
         match a.Tag, b.Tag with
         | Tag.Int, Tag.Int -> a.Int <= b.Int
-        | (Tag.Int | Tag.Float), (Tag.Int | Tag.Float) -> this.ToFloat a <= this.ToFloat b
+        | Tag.Int, Tag.Float -> intLessEqFloat a.Int b.Float
+        | Tag.Float, Tag.Int -> not (Double.IsNaN a.Float) && not (intLessFloat b.Int a.Float)
+        | Tag.Float, Tag.Float -> a.Float <= b.Float
         | Tag.Str, Tag.Str -> String.CompareOrdinal(a.Obj :?> string, b.Obj :?> string) <= 0
         | _ -> this.CmpMeta(mLe, a, b, "compare")
 

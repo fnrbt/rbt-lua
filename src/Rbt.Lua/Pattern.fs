@@ -264,14 +264,16 @@ module LuaPattern =
         let p0 = if anchor then 1 else 0
         let ms = newMS s pat
         let mutable pos = 0
+        let mutable lastEnd = -1
         fun () ->
             let mutable result = [| Value.Nil |]
             let mutable go = pos <= s.Length
             while go do
                 ms.level <- 0
                 let e = doMatch ms pos p0
-                if e <> -1 then
+                if e <> -1 && (e <> pos || pos <> lastEnd) then
                     let caps = pushCaptures ms pos e true
+                    lastEnd <- e
                     pos <- if e = pos then e + 1 else e
                     result <- caps
                     go <- false
@@ -288,12 +290,14 @@ module LuaPattern =
         let sb = StringBuilder()
         let mutable pos = 0
         let mutable count = 0
+        let mutable lastEnd = -1
         let mutable go = true
         while go && count < maxN do
             ms.level <- 0
             let e = doMatch ms pos p0
-            if e <> -1 then
+            if e <> -1 && (e <> pos || pos <> lastEnd) then
                 count <- count + 1
+                lastEnd <- e
                 let caps = pushCaptures ms pos e true
                 match applyRepl caps pos e with
                 | ValueSome r -> sb.Append r |> ignore

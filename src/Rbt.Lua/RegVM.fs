@@ -128,9 +128,6 @@ module RegVM =
         | CBinary(Add, a, b) when (intConst b).IsSome ->
             let saved = c.Free in let r = exprAny c a in c.Free <- saved
             emit c ROp.AddI dst r (intConst b).Value |> ignore
-        | CBinary(Add, a, b) when (intConst a).IsSome ->
-            let saved = c.Free in let r = exprAny c b in c.Free <- saved
-            emit c ROp.AddI dst r (intConst a).Value |> ignore
         | CBinary(Sub, a, b) when (intConst b).IsSome ->
             let saved = c.Free in let r = exprAny c a in c.Free <- saved
             emit c ROp.SubI dst r (intConst b).Value |> ignore
@@ -265,12 +262,7 @@ module RegVM =
         | TLocal lr -> if lr.IsCell then emit c ROp.SetCell srcReg lr.Index 0 |> ignore elif lr.Index <> srcReg then emit c ROp.Move lr.Index srcReg 0 |> ignore
         | TUpval u -> emit c ROp.SetUpval srcReg u.UIndex 0 |> ignore
         | TGlobal n -> emit c ROp.SetGlobal srcReg (konst c (Value.str n)) 0 |> ignore
-        | TIndex(o, k) ->
-            let saved = c.Free
-            let ro = exprAny c o
-            let rk = exprAny c k
-            c.Free <- saved
-            emit c ROp.SetIdx ro rk srcReg |> ignore
+        | TIndex _ -> failwith "indexed target must be prepared"
 
     and private cStat (c: Ctx) (s: CStat) =
         let saved = c.Free
@@ -320,17 +312,24 @@ module RegVM =
                 elif lr.Index <> baseR + i then emit c ROp.Move lr.Index (baseR + i) 0 |> ignore
 
     and private cAssign (c: Ctx) (targets: CTarget[]) (exprs: CExpr[]) =
-        if targets.Length = 1 && exprs.Length = 1 && not (isMulti exprs.[0]) then
-            match targets.[0] with
-            | TLocal lr when not lr.IsCell -> exprTo c exprs.[0] lr.Index
-            | t -> let r = exprAny c exprs.[0] in assignTarget c t r
-        else
-            let nt = targets.Length
-            let baseR = c.Free
-            produceFixed c exprs nt baseR
-            c.Free <- baseR + nt
-            for i in 0 .. nt - 1 do assignTarget c targets.[i] (baseR + i)
-            c.Free <- baseR
+        let saved = c.Free
+        let indexed =
+            targets |> Array.map (function
+                | TIndex(o, k) ->
+                    let ro = reserve c
+                    exprTo c o ro
+                    let rk = reserve c
+                    exprTo c k rk
+                    Some(ro, rk)
+                | _ -> None)
+        let baseR = c.Free
+        produceFixed c exprs targets.Length baseR
+        c.Free <- baseR + targets.Length
+        for i in targets.Length - 1 .. -1 .. 0 do
+            match indexed.[i] with
+            | Some(ro, rk) -> emit c ROp.SetIdx ro rk (baseR + i) |> ignore
+            | None -> assignTarget c targets.[i] (baseR + i)
+        c.Free <- saved
 
     /// Produce exactly `n` values into registers baseR..baseR+n-1.
     and private produceFixed (c: Ctx) (exprs: CExpr[]) (n: int) (baseR: int) =

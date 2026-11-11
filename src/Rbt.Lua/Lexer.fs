@@ -156,13 +156,24 @@ module Lexer =
             let mutable isFloat = false
             if cur () = '0' && (peek 1 = 'x' || peek 1 = 'X') then
                 i <- i + 2
+                let digits = i
                 while isHex (cur ()) do i <- i + 1
-                if cur () = '.' then (isFloat <- true; i <- i + 1; while isHex (cur ()) do i <- i + 1)
+                let mutable hasDigits = i > digits
+                if cur () = '.' then
+                    isFloat <- true
+                    i <- i + 1
+                    let fractional = i
+                    while isHex (cur ()) do i <- i + 1
+                    hasDigits <- hasDigits || i > fractional
+                if not hasDigits then fail "malformed number"
                 if cur () = 'p' || cur () = 'P' then
                     isFloat <- true
                     i <- i + 1
                     if cur () = '+' || cur () = '-' then i <- i + 1
+                    let exponent = i
                     while isDigit (cur ()) do i <- i + 1
+                    if i = exponent then fail "malformed number"
+                if isAlphaNum (cur ()) || cur () = '.' then fail "malformed number"
                 let text = src.Substring(start, i - start)
                 if isFloat then
                     Float(parseHexFloat text)
@@ -179,7 +190,10 @@ module Lexer =
                     isFloat <- true
                     i <- i + 1
                     if cur () = '+' || cur () = '-' then i <- i + 1
+                    let exponent = i
                     while isDigit (cur ()) do i <- i + 1
+                    if i = exponent then fail "malformed number"
+                if isAlphaNum (cur ()) || cur () = '.' then fail "malformed number"
                 let text = src.Substring(start, i - start)
                 if isFloat then
                     Float(Double.Parse(text, CultureInfo.InvariantCulture))
@@ -284,9 +298,9 @@ module Lexer =
             if idx < s.Length && (s.[idx] = '+' || s.[idx] = '-') then
                 (if s.[idx] = '-' then sign <- -1)
                 idx <- idx + 1
-            let mutable e = 0
+            let mutable e = 0.0
             while idx < s.Length && isDigit s.[idx] do
-                e <- e * 10 + int s.[idx] - int '0'
+                e <- min 100000.0 (e * 10.0 + double (int s.[idx] - int '0'))
                 idx <- idx + 1
-            exp <- sign * e
+            exp <- sign * int e
         mantissa * Math.Pow(2.0, double exp)

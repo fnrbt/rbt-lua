@@ -128,7 +128,23 @@ metatables (`__index`, `__newindex`, `__add`/…, `__eq`, `__lt`, `__call`, `__t
 generic `for`, `while`/`repeat`, method calls, `pcall`/`error`, and a standard library:
 base, `math`, `string` (including Lua pattern matching: `find`/`match`/`gmatch`/`gsub` and
 `string.format`), `table`, `os`, `io`. (Not yet: coroutines, `goto`/labels, full `_ENV`,
-byte-accurate non-ASCII strings.)
+byte-accurate non-ASCII strings, or local `<const>`/`<close>` attributes. Unsupported
+local attributes are rejected with a syntax error rather than silently ignored.)
+
+Numeric comparisons preserve integer precision when mixed with floats, including
+64-bit boundaries. Indexed assignment captures targets before evaluating the RHS.
+`next` supports clearing existing keys during traversal without rescanning the table
+from the beginning for every key. Deleted hash cursors may remain allocated until
+the traversal completes or restarts; abandoning a traversal can retain them until
+the next traversal.
+
+Regression coverage includes these semantics across execution backends, protected
+errors, table mutation boundaries, patterns, numeric parsing/formatting, and
+cancellation:
+
+```bash
+dotnet test tests/Rbt.Lua.Tests -c Release
+```
 
 ## Usage
 

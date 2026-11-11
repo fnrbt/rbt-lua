@@ -97,6 +97,8 @@ module StdLib =
 
         reg "setmetatable" (fun a ->
             let t = checkTable 1 "setmetatable" a
+            if not (isNull t.Metatable) && not (t.Metatable.Get(Value.str "__metatable")).IsNil then
+                err "cannot change a protected metatable"
             let mt = arg a 1
             t.Metatable <- (if mt.IsNil then null elif mt.Tag = Tag.Table then mt.Obj :?> LuaTable else badArg 2 "setmetatable" "nil or table" mt)
             one (arg a 0))
@@ -134,6 +136,13 @@ module StdLib =
         reg "xpcall" (fun a ->
             let f = arg a 0
             let handler = arg a 1
+            let handleError error =
+                try
+                    let handled = interp.Call(handler, [| error |])
+                    [| Value.False; if handled.Length > 0 then handled.[0] else Value.Nil |]
+                with
+                | :? OperationCanceledException -> reraise()
+                | _ -> [| Value.False; Value.str "error in error handling" |]
             try
                 let res = interp.Call(f, (if a.Length > 2 then a.[2..] else emptyValues))
                 let r = Array.zeroCreate (res.Length + 1)
@@ -141,9 +150,9 @@ module StdLib =
                 Array.blit res 0 r 1 res.Length
                 r
             with
-            | :? LuaError as e -> [| Value.False; interp.Call(handler, [| e.Value |]) |> (fun x -> if x.Length > 0 then x.[0] else Value.Nil) |]
             | :? OperationCanceledException -> reraise()
-            | e -> [| Value.False; interp.Call(handler, [| Value.str e.Message |]) |> (fun x -> if x.Length > 0 then x.[0] else Value.Nil) |])
+            | :? LuaError as e -> handleError e.Value
+            | e -> handleError (Value.str e.Message))
 
         def "select" (lua {
             let! n = value
@@ -161,22 +170,8 @@ module StdLib =
 
         let nextFn = func "next" (fun a ->
             let t = checkTable 1 "next" a
-            let k = arg a 1
-            // O(n) stateless next; pairs() uses a faster closure iterator below.
-            let mutable e = t.Pairs().GetEnumerator()
-            if k.IsNil then (if e.MoveNext() then let (kk, vv) = e.Current in [| kk; vv |] else one Value.Nil)
-            else
-                let mutable found = false
-                let mutable result = one Value.Nil
-                let mutable go = true
-                while go && e.MoveNext() do
-                    let (kk, _) = e.Current
-                    if found then
-                        let (k2, v2) = e.Current
-                        result <- [| k2; v2 |]
-                        go <- false
-                    elif Value.Eq(kk, k) then found <- true
-                result)
+            let key, value = t.Next(arg a 1)
+            if key.IsNil then one Value.Nil else [| key; value |])
         G.Set(Value.str "next", nextFn)
 
         reg "pairs" (fun a ->
@@ -184,12 +179,8 @@ module StdLib =
             let mm = interp.MetaField(v, Value.str "__pairs")
             if not mm.IsNil then interp.Call(mm, [| v |])
             else
-                let t = checkTable 1 "pairs" a
-                let en = t.Pairs().GetEnumerator()
-                let iter = func "pairs.iterator" (fun _ ->
-                    if en.MoveNext() then let (k, vv) = en.Current in [| k; vv |]
-                    else one Value.Nil)
-                [| iter; v; Value.Nil |])
+                checkTable 1 "pairs" a |> ignore
+                [| nextFn; v; Value.Nil |])
 
         reg "ipairs" (fun a ->
             let v = arg a 0
@@ -228,7 +219,8 @@ module StdLib =
             else one (Value.float (Math.Log(x, checkNum 2 "log" interp a))))
         defIn math "abs" (lua {
             let! v = value
-            return (if v.Tag = Tag.Int then Value.int (abs v.Int)
+            return (if v.Tag = Tag.Int then
+                        Value.int (if v.Int = Int64.MinValue then Int64.MinValue else abs v.Int)
                     else Value.float (abs (interp.ToFloat (interp.AsNumber(v, "abs"))))) })
         let floorCeil name (f: double -> double) =
             defIn math name (lua {
@@ -383,6 +375,7 @@ module StdLib =
             else
                 let pos = checkInt 2 "insert" interp a
                 let n = t.Length
+                if pos < 1L || pos > n + 1L then err "bad argument #2 to 'insert' (position out of bounds)"
                 let mutable i = n
                 while i >= pos do
                     t.Set(Value.int (i + 1L), t.Get(Value.int i))
@@ -393,15 +386,15 @@ module StdLib =
             let t = checkTable 1 "remove" a
             let n = t.Length
             let pos = optInt 2 "remove" interp a n
-            if n = 0L && (arg a 1).IsNil then one Value.Nil
-            else
-                let removed = t.Get(Value.int pos)
-                let mutable i = pos
-                while i < n do
-                    t.Set(Value.int i, t.Get(Value.int (i + 1L)))
-                    i <- i + 1L
-                t.Set(Value.int n, Value.Nil)
-                one removed)
+            if pos <> n && (pos < 1L || pos > n + 1L) then
+                err "bad argument #2 to 'remove' (position out of bounds)"
+            let removed = t.Get(Value.int pos)
+            let mutable i = pos
+            while i < n do
+                t.Set(Value.int i, t.Get(Value.int (i + 1L)))
+                i <- i + 1L
+            t.Set(Value.int i, Value.Nil)
+            one removed)
         regIn tablib "concat" (fun a ->
             let t = checkTable 1 "concat" a
             let sep = if (arg a 1).IsNil then "" else checkStr 2 "concat" a

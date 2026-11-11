@@ -266,16 +266,22 @@ module StackVM =
             | TGlobal n -> cExpr c exprs.[0]; emit c Op.SetGlobal (konst c (Value.str n)) 0 |> ignore; pop c 1
             | TIndex(o, k) -> cExpr c o; cExpr c k; cExpr c exprs.[0]; emit c Op.SetIndex 0 0 |> ignore; pop c 3
         else
+            // Keep evaluated target pairs below the RHS mark until all writes finish.
+            for t in targets do
+                match t with
+                | TIndex(o, k) -> cExpr c o; cExpr c k
+                | _ -> ()
             emit c Op.Mark 0 0 |> ignore
             cExprListExpand c exprs
             emit c Op.Collect 0 0 |> ignore
             c.Depth <- c.MaxDepth
-            targets |> Array.iteri (fun i t ->
-                match t with
+            // Target pairs are on the stack in source order, so consume them backwards.
+            for i in targets.Length - 1 .. -1 .. 0 do
+                match targets.[i] with
                 | TLocal lr -> emit c Op.PushTmp i 0 |> ignore; push c 1; emit c (if lr.IsCell then Op.SetCell else Op.SetSlot) lr.Index 0 |> ignore; pop c 1
                 | TUpval u -> emit c Op.PushTmp i 0 |> ignore; push c 1; emit c Op.SetUpval u.UIndex 0 |> ignore; pop c 1
                 | TGlobal n -> emit c Op.PushTmp i 0 |> ignore; push c 1; emit c Op.SetGlobal (konst c (Value.str n)) 0 |> ignore; pop c 1
-                | TIndex(o, k) -> cExpr c o; cExpr c k; emit c Op.PushTmp i 0 |> ignore; push c 1; emit c Op.SetIndex 0 0 |> ignore; pop c 3)
+                | TIndex _ -> emit c Op.PushTmp i 0 |> ignore; push c 1; emit c Op.SetIndex 0 0 |> ignore; pop c 3
 
     and private cReturn (c: Ctx) (exprs: CExpr[]) =
         if exprs.Length = 0 then emit c Op.Ret0 0 0 |> ignore
@@ -329,8 +335,11 @@ module StackVM =
         cBlock c body
         emit c Op.ForLoop lvenc bodyStart |> ignore
         patch c prep (here c)
-        pop c 3
+        let skipCleanup = emit c Op.Jmp 0 0
         for bp in c.Breaks.Pop() do patch c bp (here c)
+        for _ in 1 .. 3 do emit c Op.Pop 0 0 |> ignore
+        patch c skipCleanup (here c)
+        pop c 3
 
     and private cGenFor (c: Ctx) (vars: LocalRef[]) exprs body =
         emit c Op.Mark 0 0 |> ignore
@@ -345,8 +354,11 @@ module StackVM =
         cBlock c body
         emit c Op.Jmp 0 loopStart |> ignore
         patch c call (here c)
-        pop c 3
+        let skipCleanup = emit c Op.Jmp 0 0
         for bp in c.Breaks.Pop() do patch c bp (here c)
+        for _ in 1 .. 3 do emit c Op.Pop 0 0 |> ignore
+        patch c skipCleanup (here c)
+        pop c 3
 
     and compileProto (proto: CProto) : Proto =
         let c = newCtx ()

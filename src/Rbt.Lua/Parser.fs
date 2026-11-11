@@ -280,11 +280,8 @@ module Parser =
                 let names = ResizeArray<string>()
                 let readName () =
                     names.Add(expectName ())
-                    // Lua 5.4 attribute: `<const>` / `<close>` — parsed and ignored.
                     if peek () = Lt then
-                        pos <- pos + 1
-                        expectName () |> ignore
-                        expect Gt
+                        fail "local variable attributes are not supported"
                 readName ()
                 while peek () = Comma do (pos <- pos + 1; readName ())
                 let exprs = if peek () = Eq then (pos <- pos + 1; parseExprList ()) else []

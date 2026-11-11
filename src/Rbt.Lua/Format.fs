@@ -87,7 +87,10 @@ module Format =
                 let toFloat () = match interp.ToNumber(nextArg ()) with ValueSome x -> interp.ToFloat x | ValueNone -> raise (LuaError(Value.str "bad argument to 'format' (number expected)"))
                 match conv with
                 | '%' -> sb.Append '%' |> ignore
-                | 'd' | 'i' -> let v = toInt () in sb.Append(padNum (string (abs v)) (v < 0L) flags width prec) |> ignore
+                | 'd' | 'i' ->
+                    let v = toInt ()
+                    let magnitude = if v < 0L then uint64 (~~~v) + 1UL else uint64 v
+                    sb.Append(padNum (string magnitude) (v < 0L) flags width prec) |> ignore
                 | 'u' -> sb.Append(padNum (string (uint64 (toInt ()))) false flags width prec) |> ignore
                 | 'x' -> sb.Append(padNum ((uint64 (toInt ())).ToString "x") false flags width prec) |> ignore
                 | 'X' -> sb.Append(padNum ((uint64 (toInt ())).ToString "X") false flags width prec) |> ignore

@@ -33,15 +33,23 @@ type Value =
     member inline v.Float = v.Num
     member inline v.Str = v.Obj :?> string
 
+    /// A float represents an integer exactly only inside the signed 64-bit range.
+    static member TryExactInt64(f: double) : int64 voption =
+        if f >= -9223372036854775808.0 && f < 9223372036854775808.0 && Math.Truncate f = f then
+            ValueSome(int64 f)
+        else ValueNone
+
     static member Eq(a: Value, b: Value) =
         match a.Tag, b.Tag with
         | Tag.Nil, Tag.Nil -> true
         | Tag.True, Tag.True | Tag.False, Tag.False -> true
         | Tag.Int, Tag.Int -> a.Int = b.Int
         | Tag.Float, Tag.Float -> a.Num = b.Num
-        // cross-subtype numeric equality: 3 == 3.0
-        | Tag.Int, Tag.Float -> double a.Int = b.Num
-        | Tag.Float, Tag.Int -> a.Num = double b.Int
+        // Converting the integer to double would round large integers together.
+        | Tag.Int, Tag.Float ->
+            match Value.TryExactInt64 b.Num with ValueSome i -> a.Int = i | ValueNone -> false
+        | Tag.Float, Tag.Int ->
+            match Value.TryExactInt64 a.Num with ValueSome i -> i = b.Int | ValueNone -> false
         | Tag.Str, Tag.Str -> String.Equals(a.Obj :?> string, b.Obj :?> string)
         | _ when byte a.Tag = byte b.Tag -> obj.ReferenceEquals(a.Obj, b.Obj)
         | _ -> false
@@ -57,7 +65,10 @@ type Value =
         | Tag.False -> 1
         | Tag.True -> 2
         | Tag.Int -> this.Int.GetHashCode()
-        | Tag.Float -> this.Num.GetHashCode()
+        | Tag.Float ->
+            match Value.TryExactInt64 this.Num with
+            | ValueSome i -> i.GetHashCode()
+            | ValueNone -> this.Num.GetHashCode()
         | Tag.Str -> (this.Obj :?> string).GetHashCode()
         | _ -> RuntimeHelpers.GetHashCode this.Obj
 
@@ -91,6 +102,13 @@ module Value =
 
 // ---------------------------------------------------------------------------
 
+[<AllowNullLiteral>]
+type private HashEntry(key: Value, value: Value) =
+    member _.Key = key
+    member val Value = value with get, set
+    member val Next : HashEntry = null with get, set
+    member val Prev : HashEntry = null with get, set
+
 /// A Lua table: a hybrid of a dense array part (1-based contiguous integer keys)
 /// and a hash part for everything else, plus an optional metatable.
 [<AllowNullLiteral>]
@@ -98,29 +116,71 @@ type LuaTable() =
     // Array part holds keys 1..Count at indices 0..Count-1.
     let mutable arr : Value[] = Array.empty
     let mutable acount = 0
-    let mutable hash : Dictionary<Value, Value> = null
+    let mutable hash : Dictionary<Value, HashEntry> = null
+    let mutable first : HashEntry = null
+    let mutable last : HashEntry = null
+    let mutable arrayHighWater = 0
+    let mutable traversing = false
+    let mutable removed : ResizeArray<HashEntry> = null
     member val Metatable : LuaTable = null with get, set
 
     member private _.EnsureHash() =
-        if isNull hash then hash <- Dictionary<Value, Value>()
+        if isNull hash then hash <- Dictionary<Value, HashEntry>()
         hash
 
-    /// Normalize a float key with an integral value to an integer key (Lua semantics).
+    member private _.Unlink(entry: HashEntry) =
+        if isNull entry.Prev then first <- entry.Next else entry.Prev.Next <- entry.Next
+        if isNull entry.Next then last <- entry.Prev else entry.Next.Prev <- entry.Prev
+
+    member private _.MarkRemoved(entry: HashEntry) =
+        if not entry.Value.IsNil then
+            entry.Value <- Value.Nil
+            if isNull removed then removed <- ResizeArray()
+            removed.Add entry
+
+    member private this.ClearRemoved() =
+        if not (isNull removed) then
+            for entry in removed do
+                if entry.Value.IsNil then
+                    let mutable current = Unchecked.defaultof<HashEntry>
+                    if hash.TryGetValue(entry.Key, &current) && obj.ReferenceEquals(entry, current) then
+                        hash.Remove entry.Key |> ignore
+                        this.Unlink entry
+            removed.Clear()
+
+    member private this.SetHash(key: Value, value: Value) =
+        if not (isNull hash) && hash.ContainsKey key then
+            let entry = hash.[key]
+            if value.IsNil && not traversing then
+                hash.Remove key |> ignore
+                this.Unlink entry
+            else if value.IsNil then this.MarkRemoved entry else entry.Value <- value
+        elif not value.IsNil then
+            let entry = HashEntry(key, value)
+            if isNull last then first <- entry else (last.Next <- entry; entry.Prev <- last)
+            last <- entry
+            (this.EnsureHash()).Add(key, entry)
+
+    /// Normalize integral floats only when their exact value fits a Lua integer.
     static member inline private NormKey(k: Value) =
         if k.Tag = Tag.Float then
-            let f = k.Num
-            let i = int64 f
-            if double i = f && not (Double.IsInfinity f) then Value.int i else k
+            match Value.TryExactInt64 k.Num with
+            | ValueSome i -> Value.int i
+            | ValueNone -> k
         else k
 
     /// Pull contiguous successors from the hash part into the array part after an append.
     member private this.Migrate() =
         if not (isNull hash) then
             let mutable next = Value.int (int64 acount + 1L)
-            let mutable v = Unchecked.defaultof<Value>
-            while hash.TryGetValue(next, &v) do
-                hash.Remove next |> ignore
-                this.Append v
+            let mutable entry = Unchecked.defaultof<HashEntry>
+            while hash.TryGetValue(next, &entry) && not entry.Value.IsNil do
+                let value = entry.Value
+                if traversing then this.MarkRemoved entry
+                else
+                    hash.Remove next |> ignore
+                    this.Unlink entry
+                this.Append value
                 next <- Value.int (int64 acount + 1L)
 
     member private _.Append(v: Value) =
@@ -131,6 +191,7 @@ type LuaTable() =
             arr <- na
         arr.[acount] <- v
         acount <- acount + 1
+        arrayHighWater <- max arrayHighWater acount
 
     member this.Get(key: Value) : Value =
         match key.Tag with
@@ -138,13 +199,13 @@ type LuaTable() =
             let i = key.Int
             if i >= 1L && i <= int64 acount then arr.[int i - 1]
             elif isNull hash then Value.Nil
-            else match hash.TryGetValue key with | true, v -> v | _ -> Value.Nil
+            else match hash.TryGetValue key with | true, entry -> entry.Value | _ -> Value.Nil
         | Tag.Nil -> Value.Nil
         | _ ->
             let k = LuaTable.NormKey key
             if k.Tag = Tag.Int then this.Get k
             elif isNull hash then Value.Nil
-            else match hash.TryGetValue k with | true, v -> v | _ -> Value.Nil
+            else match hash.TryGetValue k with | true, entry -> entry.Value | _ -> Value.Nil
 
     member this.GetInt(i: int64) =
         if i >= 1L && i <= int64 acount then arr.[int i - 1]
@@ -165,26 +226,47 @@ type LuaTable() =
             elif i = int64 acount + 1L && not value.IsNil then
                 this.Append value
                 this.Migrate()
-            elif value.IsNil then
-                if not (isNull hash) then hash.Remove key |> ignore
-            else (this.EnsureHash()).[key] <- value
+            else this.SetHash(key, value)
         | Tag.Nil -> raise (LuaError(Value.str "table index is nil"))
         | Tag.Float when Double.IsNaN key.Num -> raise (LuaError(Value.str "table index is NaN"))
         | _ ->
-            if value.IsNil then (if not (isNull hash) then hash.Remove key |> ignore)
-            else (this.EnsureHash()).[key] <- value
+            this.SetHash(key, value)
 
     /// The border `#t`: length of the array part (a valid Lua border).
     member _.Length = int64 acount
 
-    /// Enumerate for `next`/`pairs`. Yields array part then hash part.
-    member _.Pairs() : seq<Value * Value> =
-        seq {
-            for i in 0 .. acount - 1 do
-                if not arr.[i].IsNil then yield Value.int (int64 i + 1L), arr.[i]
-            if not (isNull hash) then
-                for kv in hash do yield kv.Key, kv.Value
-        }
+    /// Find the successor without restarting an enumeration. Deleted hash entries
+    /// remain as traversal cursors until the next pass starts.
+    member this.Next(key: Value) : Value * Value =
+        let key = LuaTable.NormKey key
+        if key.IsNil then
+            this.ClearRemoved()
+            traversing <- true
+        let mutable index = -1
+        let mutable entry = first
+        if not key.IsNil then
+            if key.Tag = Tag.Int && key.Int >= 1L && key.Int <= int64 arrayHighWater &&
+               (isNull hash || not (hash.ContainsKey key) ||
+                (key.Int <= int64 acount && not arr.[int key.Int - 1].IsNil)) then
+                index <- int key.Int - 1
+            elif not (isNull hash) then
+                match hash.TryGetValue key with
+                | true, found -> entry <- found.Next
+                | _ -> raise (LuaError(Value.str "invalid key to 'next'"))
+            else raise (LuaError(Value.str "invalid key to 'next'"))
+        let mutable result = Value.Nil, Value.Nil
+        if index >= 0 || key.IsNil then
+            let mutable i = index + 1
+            while i < acount && arr.[i].IsNil do i <- i + 1
+            if i < acount then result <- Value.int (int64 i + 1L), arr.[i]
+        if (fst result).IsNil then
+            while not (isNull entry) && entry.Value.IsNil do entry <- entry.Next
+            if not (isNull entry) then result <- entry.Key, entry.Value
+            else
+                traversing <- false
+                this.ClearRemoved()
+        result
+
 
     member _.ArrayCount = acount
 

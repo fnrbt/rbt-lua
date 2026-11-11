@@ -28,14 +28,53 @@ module Numbers =
 
     let inline private isHexDigit c =
         (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+    let inline private hexValue c =
+        if c >= '0' && c <= '9' then int c - int '0'
+        elif c >= 'a' && c <= 'f' then int c - int 'a' + 10
+        else int c - int 'A' + 10
+
 
     let private parseHexInt (s: string) : int64 voption =
         let mutable acc = 0UL
         let mutable ok = s.Length > 0
         for c in s do
-            if isHexDigit c then acc <- acc * 16UL + uint64 (Convert.ToInt32(string c, 16))
+            if isHexDigit c then acc <- acc * 16UL + uint64 (hexValue c)
             else ok <- false
         if ok then ValueSome(int64 acc) else ValueNone
+
+    let private parseHexFloat (s: string) : double voption =
+        let mutable i = 0
+        let mutable mantissa = 0.0
+        let mutable digits = 0
+        let mutable fractional = 0
+        while i < s.Length && isHexDigit s.[i] do
+            mantissa <- mantissa * 16.0 + double (hexValue s.[i])
+            digits <- digits + 1
+            i <- i + 1
+        if i < s.Length && s.[i] = '.' then
+            i <- i + 1
+            while i < s.Length && isHexDigit s.[i] do
+                mantissa <- mantissa * 16.0 + double (hexValue s.[i])
+                digits <- digits + 1
+                fractional <- fractional + 1
+                i <- i + 1
+        if digits = 0 then ValueNone
+        else
+            let mutable exponent = 0
+            if i < s.Length && (s.[i] = 'p' || s.[i] = 'P') then
+                i <- i + 1
+                let mutable sign = 1
+                if i < s.Length && (s.[i] = '+' || s.[i] = '-') then
+                    if s.[i] = '-' then sign <- -1
+                    i <- i + 1
+                let start = i
+                while i < s.Length && s.[i] >= '0' && s.[i] <= '9' do
+                    exponent <- min 4096 (exponent * 10 + int s.[i] - int '0')
+                    i <- i + 1
+                if i = start then i <- -1
+                exponent <- exponent * sign
+            if i <> s.Length then ValueNone
+            else ValueSome (Math.ScaleB(mantissa, exponent - 4 * fractional))
 
     /// Parse a string as a Lua number, honoring optional sign, hex integers and
     /// decimal int/float. Returns ValueNone if it is not a valid numeral.
@@ -48,9 +87,15 @@ module Numbers =
                 elif s.[0] = '+' then 1L, s.Substring 1
                 else 1L, s
             if body.Length > 1 && body.[0] = '0' && (body.[1] = 'x' || body.[1] = 'X') then
-                match parseHexInt (body.Substring 2) with
-                | ValueSome i -> ValueSome(Value.int (sign * i))
-                | ValueNone -> ValueNone
+                let hex = body.Substring 2
+                if hex.IndexOfAny [| '.'; 'p'; 'P' |] >= 0 then
+                    match parseHexFloat hex with
+                    | ValueSome f -> ValueSome(Value.float (double sign * f))
+                    | ValueNone -> ValueNone
+                else
+                    match parseHexInt hex with
+                    | ValueSome i -> ValueSome(Value.int (sign * i))
+                    | ValueNone -> ValueNone
             else
                 match Int64.TryParse(s, NumberStyles.AllowLeadingSign, inv) with
                 | true, i -> ValueSome(Value.int i)
