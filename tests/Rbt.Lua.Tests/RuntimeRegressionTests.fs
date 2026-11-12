@@ -114,3 +114,21 @@ let ``hexadecimal fractions with binary exponents parse through tonumber`` () =
                tonumber('0x1.p') == nil,
                tonumber('0x.p1') == nil
     """
+
+[<Fact>]
+let ``host Pairs enumerates array then hash entries without disturbing Lua traversal`` () =
+    let t = LuaTable()
+    t.Set(Value.int 1L, Value.str "a")
+    t.Set(Value.int 2L, Value.str "b")
+    t.Set(Value.str "x", Value.int 10L)
+    t.Set(Value.str "y", Value.int 20L)
+    t.Set(Value.str "gone", Value.int 0L)
+    t.Set(Value.str "gone", Value.Nil)
+    let pairs = t.Pairs() |> Seq.map (fun (k, v) -> Numbers.toString k, Numbers.toString v) |> Seq.toList
+    Assert.Equal<(string * string) list>([ "1", "a"; "2", "b"; "x", "10"; "y", "20" ], pairs)
+    // Abandoning a host enumeration leaves no traversal state behind.
+    t.Pairs() |> Seq.head |> ignore
+    t.Set(Value.str "x", Value.Nil)
+    Assert.Equal(3, t.Pairs() |> Seq.length)
+    let k, _ = t.Next(Value.Nil)
+    Assert.Equal("1", Numbers.toString k)

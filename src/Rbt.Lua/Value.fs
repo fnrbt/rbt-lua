@@ -235,6 +235,20 @@ type LuaTable() =
     /// The border `#t`: length of the array part (a valid Lua border).
     member _.Length = int64 acount
 
+    /// Host-side enumeration: array part, then hash part in insertion order.
+    /// Unlike `Next`, it does not touch Lua traversal state, so a host may stop
+    /// early without affecting a Lua `next`/`pairs` loop. Entries cleared during
+    /// a Lua traversal are skipped.
+    member _.Pairs() : seq<Value * Value> =
+        seq {
+            for i in 0 .. acount - 1 do
+                if not arr.[i].IsNil then yield Value.int (int64 i + 1L), arr.[i]
+            let mutable entry = first
+            while not (isNull entry) do
+                if not entry.Value.IsNil then yield entry.Key, entry.Value
+                entry <- entry.Next
+        }
+
     /// Find the successor without restarting an enumeration. Deleted hash entries
     /// remain as traversal cursors until the next pass starts.
     member this.Next(key: Value) : Value * Value =
