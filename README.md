@@ -7,28 +7,30 @@ single dispatch loop.
 
 ## Performance
 
-A small benchmark suite lives in `bench/` and compares against
-[MoonSharp](https://www.moonsharp.org/) and, when `lua5.4` is on `PATH`, the
-reference C implementation. One run on a development machine (best of 5, ms, .NET 10):
+A small benchmark suite lives in `bench/` and compares against the reference C
+implementation (when `lua5.4` is on `PATH`) and [MoonSharp](https://www.moonsharp.org/).
+One run on a development machine (best of 5, ms; C Lua 5.4.7 built with its default
+`-O2`, .NET 10):
 
 ```
-benchmark               fslua   MoonSharp
-fib(33)                   512        2810
-loop sum 1..30M           389        2918
-nested loop 6000^2        430        3330
-ackermann(3,8)            189         922
-table fill+sum 3M         217        2129
-string concat 300k         27         193
-sieve 2M                 1078        8678
-OOP vectors 1M            606        1107
-coroutine gen 1M          180         393
-pcall+error 300k           61         761
+benchmark               fslua   C Lua   MoonSharp
+fib(33)                   574     165        2683
+loop sum 1..30M           468      95        3053
+nested loop 6000^2        549     127        3266
+ackermann(3,8)            168      36         961
+table fill+sum 3M         238      73        2748
+string concat 300k         43      67         231
+sieve 2M                  560     119       10424
+OOP vectors 1M            453     175        1252
+coroutine gen 1M          170      73         466
+pcall+error 300k           72      47         849
 ```
 
-Against C Lua 5.4 (measured earlier, on a different machine) fslua is roughly
-3-4x slower overall, with the widest gaps on call- and table-heavy code. Numbers
-vary noticeably between runs; treat them as rough. `BENCH_LOG.md` records the
-optimization history.
+Overall fslua is roughly 3-4x slower than C Lua here, with the widest gaps on tight
+arithmetic loops and the smallest on protected calls, coroutines and string building.
+Numbers vary noticeably between runs on this machine; treat them as rough.
+`BENCH_LOG.md` records the optimization history, including approaches that were
+measured and rejected.
 
 ## Architecture
 
