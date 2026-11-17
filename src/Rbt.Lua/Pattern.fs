@@ -5,6 +5,13 @@ open System.Text
 
 /// Lua pattern matching (a port of the reference `lstrlib.c` matcher) over Lua
 /// strings' bytes. Character classes follow the C locale (ASCII only).
+///
+/// Unlike lstrlib.c, matching does not recurse: an explicit stack of choice
+/// frames holds backtracking points (a greedy or lazy repetition needs one
+/// frame, not one per byte), and a capture undo log restores capture state when
+/// an alternative fails. Deep patterns therefore never exhaust the host stack.
+/// Matching, scanning and backtracking call `dispatch` so interpreter
+/// cancellation can interrupt pathological patterns; there is no work budget.
 module LuaPattern =
 
     let private L_ESC = '%'B

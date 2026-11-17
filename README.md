@@ -92,10 +92,8 @@ metatables (`__index`, `__newindex`, `__add`/…, `__eq`, `__lt`, `__call`, `__t
 generic `for`, `while`/`repeat`, method calls, `pcall`/`xpcall`/`error`, coroutines, and a
 standard library: base, `coroutine`, `math`, `string` (including Lua pattern matching:
 `find`/`match`/`gmatch`/`gsub`, `string.format` and `string.pack`/`unpack`), `utf8`,
-`table`, `os`, `io`. Calls in `return f(...)` position are proper tail calls. (Not yet:
-`goto`/labels, full `_ENV`, `load`, `debug`, or local `<const>`/`<close>` attributes.
-Unsupported local attributes are rejected with a syntax error rather than silently
-ignored.)
+`table`, and minimal `os`/`io`. Calls in `return f(...)` position are proper tail
+calls. See [Known limitations](#known-limitations) for what is not implemented yet.
 
 Strings are byte sequences, as in C Lua: `#s`, `string.sub`/`byte`/`char`, comparison
 and patterns work on bytes, character classes follow the C locale (ASCII), and `\x`,
@@ -120,38 +118,30 @@ dotnet test tests/Rbt.Lua.Tests -c Release
 
 The suite also runs the scripts in `tests/Rbt.Lua.Tests/differential/` and compares
 their output byte-for-byte with output recorded from C Lua 5.4.7 (number formatting,
-`string.format`, byte strings, `utf8`, `string.pack`, the string and table libraries,
-metatables, coroutines, and library error messages). After adding or changing a script, regenerate the expected output
-with a reference interpreter:
+`string.format`, byte strings, patterns, `utf8`, `string.pack`, the string and table
+libraries, metatables, coroutines, and library error messages). After adding or
+changing a script, regenerate the expected output with a reference interpreter:
 
 ```bash
 LUA=/path/to/lua5.4 tests/Rbt.Lua.Tests/differential/regen.sh
 ```
 
-## Pattern execution and remaining work
+## Known limitations
 
-Pattern matching uses an iterative backtracking machine, not the .NET call stack.
-Reusable choice frames retain repetition cursors; a capture undo log restores
-capture state when an alternative fails. Matching, scanning, and backtracking
-cooperate with interpreter cancellation. The Lua limit of 32 captures remains;
-deep optional patterns no longer depend on native stack depth.
-
-Verification: the regression suite passes, including deep matching and cancellation.
-A 24-case differential pattern corpus matched Lua 5.4.9.
-
-Remaining items:
-
-* **Pattern work/memory limits:** removing host recursion does not remove
-  exponential backtracking or bound the explicit stack's heap usage. Cancellation
-  interrupts pathological matching, but calls without a cancellation token have
-  no work budget. A configurable work/frame budget needs a separate API and
-  compatibility decision; no arbitrary limit is imposed here.
-* **Language coverage:** `<const>`/`<close>` remain explicitly rejected; `goto`/labels
-  and full `_ENV` remain unsupported.
-* **Remaining C-call boundaries:** metamethods (`__index` functions, `__add`, …) and
-  `__call` run through the host stack, so coroutines cannot yield inside them (Lua 5.4
-  allows this). `table.sort` comparators and `gsub` callbacks are boundaries in C Lua too.
-  `pcall(coroutine.yield)` with an intrinsic as the protected function is also a boundary.
+* **Not implemented:** `goto`/labels, `<const>`/`<close>` (rejected with a syntax
+  error), full `_ENV`, `load`/`loadfile`/`dofile`/`require`, the `debug` library,
+  weak tables (`__mode`), `__gc`, `string.dump`, and userdata. `os` and `io` provide
+  only `clock`/`time`/`date`/`getenv` and `read`/`write`.
+* **Error messages** carry no source positions or variable names yet (C Lua reports
+  `chunk:12: attempt to index a nil value (local 't')`), and `error(msg, level)`
+  ignores the level.
+* **Host boundaries:** metamethods (`__index` functions, `__add`, …) and `__call`
+  handlers run through the host stack, so a coroutine cannot yield inside them (Lua
+  5.4 allows this). `table.sort` comparators and `gsub` callbacks are boundaries in C
+  Lua too.
+* **Pattern matching** has no time limit: like C Lua, pathological patterns backtrack
+  exponentially. Run untrusted code with a cancellation token (see Cancellation above).
+* **`collectgarbage`** only reports; memory is managed by the .NET GC.
 
 ## Usage
 
