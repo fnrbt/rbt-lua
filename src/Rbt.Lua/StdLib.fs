@@ -90,7 +90,7 @@ module StdLib =
 
         let typeNames =
             [ for t in [ Tag.Nil; Tag.False; Tag.Int; Tag.Str; Tag.Table; Tag.Func; Tag.Thread ] ->
-                let n = Value.typeName { Tag = t; Num = 0.0; Obj = null }
+                let n = Value.typeName (Value.obj t null)
                 n, Value.str n ] |> dict
         reg "type" (fun a ->
             checkAny 1 "type" a

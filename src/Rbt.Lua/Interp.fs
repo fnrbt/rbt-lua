@@ -11,8 +11,8 @@ module Runtime =
     let emptyValues : Value[] = [||]
     let emptyCells : Cell[] = [||]
 
-    let inline funcVal (o: obj) = { Tag = Tag.Func; Num = 0.0; Obj = o }
-    let inline tableVal (t: LuaTable) = { Tag = Tag.Table; Num = 0.0; Obj = t }
+    let funcVal (o: obj) = Value.obj Tag.Func o
+    let tableVal (t: LuaTable) = Value.obj Tag.Table t
     let inline asTable (v: Value) = v.Obj :?> LuaTable
     let inline firstOrNil (vs: Value[]) = if vs.Length > 0 then vs.[0] else Value.Nil
 

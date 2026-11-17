@@ -72,23 +72,35 @@ type Tag =
     | Func = 7uy
     | Thread = 8uy
 
-/// A Lua value. A 24-byte struct: numbers and booleans live inline in `Num`
-/// (integers are bit-reinterpreted into the double), reference types in `Obj`.
-/// This avoids the per-value heap allocation MoonSharp pays for its DynValue class.
+/// A Lua value: a small struct, so numbers and booleans never allocate.
+/// Integers are bit-reinterpreted into the numeric payload; reference types
+/// (strings, tables, functions, coroutines) live in `Obj`.
+///
+/// The fields are private and every accessor is an ordinary member (the JIT
+/// inlines them), so the layout can change without breaking compiled hosts.
+/// Build values with the `Value` module functions (`Value.int`, `Value.str`, …).
 [<Struct; CustomEquality; NoComparison>]
 type Value =
-    { Tag: Tag
-      Num: double
-      Obj: obj }
+    val private tag: Tag
+    val private num: double
+    val private obj: obj
+    internal new(tag: Tag, num: double, obj: obj) = { tag = tag; num = num; obj = obj }
 
-    member inline v.IsTruthy = byte v.Tag > 1uy
-    member inline v.IsNil = v.Tag = Tag.Nil
+    /// The Lua type of this value.
+    member v.Tag = v.tag
+    /// The reference payload (string bytes, LuaTable, function, coroutine), or null.
+    member v.Obj = v.obj
+    /// Raw numeric payload; meaning depends on Tag (string values keep a hash here).
+    member internal v.Num = v.num
+
+    member v.IsTruthy = byte v.tag > 1uy
+    member v.IsNil = v.tag = Tag.Nil
     /// Read the integer payload (only valid when Tag = Int).
-    member inline v.Int = BitConverter.DoubleToInt64Bits v.Num
+    member v.Int = BitConverter.DoubleToInt64Bits v.num
     /// Read the float payload (only valid when Tag = Float).
-    member inline v.Float = v.Num
+    member v.Float = v.num
     /// The raw bytes of a string (only valid when Tag = Str).
-    member inline v.Bytes = v.Obj :?> byte[]
+    member v.Bytes = v.obj :?> byte[]
     /// A string's text, decoded as UTF-8 (invalid sequences become U+FFFD).
     member v.Str = LuaBytes.toString (v.Obj :?> byte[])
 
@@ -152,23 +164,24 @@ type Value =
 /// ModuleSuffix trick (same pattern as `Option` the type vs `Option` the module).
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
 module Value =
-    let Nil = { Tag = Tag.Nil; Num = 0.0; Obj = null }
-    let True = { Tag = Tag.True; Num = 0.0; Obj = null }
-    let False = { Tag = Tag.False; Num = 0.0; Obj = null }
+    let Nil = Value(Tag.Nil, 0.0, null)
+    let True = Value(Tag.True, 0.0, null)
+    let False = Value(Tag.False, 0.0, null)
 
-    let inline ofBool b = if b then True else False
-    let inline int (i: int64) = { Tag = Tag.Int; Num = BitConverter.Int64BitsToDouble i; Obj = null }
-    let inline float (f: double) = { Tag = Tag.Float; Num = f; Obj = null }
+    let ofBool b = if b then True else False
+    let int (i: int64) = Value(Tag.Int, BitConverter.Int64BitsToDouble i, null)
+    let float (f: double) = Value(Tag.Float, f, null)
     /// A Lua string from raw bytes (the array must not be mutated afterwards).
     let bytes (b: byte[]) =
         let num =
             if b.Length <= LuaBytes.HashedMaxLength then
                 BitConverter.Int64BitsToDouble(LuaBytes.HashedFlag ||| int64 (uint32 (LuaBytes.hash b)))
             else 0.0
-        { Tag = Tag.Str; Num = num; Obj = b }
+        Value(Tag.Str, num, b)
     /// A Lua string holding the UTF-8 encoding of host text.
     let str (s: string) = bytes (LuaBytes.ofString s)
-    let inline obj (tag: Tag) (o: obj) = { Tag = tag; Num = 0.0; Obj = o }
+    /// A reference-typed value (table, function, coroutine) of the given tag.
+    let obj (tag: Tag) (o: obj) = Value(tag, 0.0, o)
 
     /// Lua type name as returned by the `type()` builtin.
     let typeName (v: Value) =
