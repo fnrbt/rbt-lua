@@ -21,6 +21,7 @@
     <Compile Include="RegVM.fs" />
     <Compile Include="Pattern.fs" />
     <Compile Include="Format.fs" />
+    <Compile Include="Pack.fs" />
     <Compile Include="Host.fs" />
     <Compile Include="StdLib.fs" />
     <Compile Include="Lua.fs" />

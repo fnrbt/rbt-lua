@@ -349,6 +349,11 @@ module StdLib =
 
         regIn strlib "format" (fun a -> one (bstr (Format.format interp (checkBytes 1 "string.format" a) a)))
 
+        regIn strlib "pack" (fun a -> one (bstr (Pack.pack interp (checkBytes 1 "string.pack" a) a)))
+        regIn strlib "packsize" (fun a -> one (Value.int (Pack.packsize (checkBytes 1 "string.packsize" a))))
+        regIn strlib "unpack" (fun a ->
+            Pack.unpack (checkBytes 1 "string.unpack" a) (checkBytes 2 "string.unpack" a) (optInt 3 "string.unpack" interp a 1L))
+
         regIn strlib "find" (fun a ->
             let s = checkBytes 1 "string.find" a
             let pat = checkBytes 2 "string.find" a
@@ -532,6 +537,130 @@ module StdLib =
             match interp.OutputStream with null -> () | o -> o.Flush()
             let line = interp.In.ReadLine()
             one (if isNull line then Value.Nil else Value.str line))
+
+        // ---- utf8 (a port of lutf8lib.c) ------------------------------------
+
+        let utf8lib = newLib "utf8"
+        let maxUtf = 0x7FFFFFFFL
+        let maxUnicode = 0x10FFFFL
+        // Bytes past the end read as 0 (C strings are NUL-terminated).
+        let at (s: byte[]) i = if i < s.Length then int s.[i] else 0
+        let isCont (s: byte[]) i = (at s i &&& 0xC0) = 0x80
+        /// Decode the sequence at `i`: (code point, index after it), or None.
+        let decode (s: byte[]) (i: int) (strict: bool) : struct (int64 * int) voption =
+            let limits = [| Int64.MaxValue; 0x80L; 0x800L; 0x10000L; 0x200000L; 0x4000000L |]   // [0]: a lone continuation byte never decodes
+            let mutable c = at s i
+            if c < 0x80 then ValueSome(struct (int64 c, i + 1))
+            else
+                let mutable res = 0L
+                let mutable count = 0
+                let mutable ok = true
+                while ok && (c &&& 0x40) <> 0 do
+                    count <- count + 1
+                    let cc = at s (i + count)
+                    if (cc &&& 0xC0) <> 0x80 then ok <- false
+                    else
+                        res <- (res <<< 6) ||| int64 (cc &&& 0x3F)
+                        c <- c <<< 1
+                if not ok then ValueNone
+                else
+                    res <- res ||| (int64 (c &&& 0x7F) <<< (count * 5))
+                    if count > 5 || res > maxUtf || res < limits.[count] then ValueNone
+                    elif strict && (res > maxUnicode || (res >= 0xD800L && res <= 0xDFFFL)) then ValueNone
+                    else ValueSome(struct (res, i + count + 1))
+        let posrelat (pos: int64) (len: int) = if pos >= 0L then pos elif -pos > int64 len then 0L else int64 len + pos + 1L
+        let encode (sb: ByteBuilder) (cp: int64) =
+            if cp < 0x80L then sb.Append(byte cp)
+            else
+                let mutable count = 1
+                while cp >= (1L <<< (5 * count + 6)) do count <- count + 1
+                sb.Append(byte (((0xFF00L >>> (count + 1)) &&& 0xFFL) ||| (cp >>> (6 * count))))
+                for k in count - 1 .. -1 .. 0 do sb.Append(byte (0x80L ||| ((cp >>> (6 * k)) &&& 0x3FL)))
+        utf8lib.Set(Value.str "charpattern", Value.bytes [| yield '['B; yield 0uy; yield '-'B; yield 0x7Fuy; yield 0xC2uy; yield '-'B; yield 0xFDuy; yield ']'B; yield '['B; yield 0x80uy; yield '-'B; yield 0xBFuy; yield ']'B; yield '*'B |])
+        regIn utf8lib "char" (fun a ->
+            let sb = ByteBuilder()
+            for i in 0 .. a.Length - 1 do
+                let code = checkInt (i + 1) "utf8.char" interp a
+                if uint64 code > uint64 maxUtf then err (sprintf "bad argument #%d to 'utf8.char' (value out of range)" (i + 1))
+                encode sb code
+            one (Value.bytes (sb.ToArray())))
+        regIn utf8lib "len" (fun a ->
+            let s = checkBytes 1 "utf8.len" a
+            let len = s.Length
+            let mutable posi = posrelat (optInt 2 "utf8.len" interp a 1L) len
+            let mutable posj = posrelat (optInt 3 "utf8.len" interp a -1L) len
+            let lax = (arg a 3).IsTruthy
+            if not (1L <= posi && posi - 1L <= int64 len) then err "bad argument #2 to 'utf8.len' (initial position out of bounds)"
+            posi <- posi - 1L
+            posj <- posj - 1L
+            if not (posj < int64 len) then err "bad argument #3 to 'utf8.len' (final position out of bounds)"
+            let mutable n = 0L
+            let mutable result = null
+            while isNull result && posi <= posj do
+                match decode s (int posi) (not lax) with
+                | ValueNone -> result <- [| Value.Nil; Value.int (posi + 1L) |]
+                | ValueSome(struct (_, next)) ->
+                    posi <- int64 next
+                    n <- n + 1L
+            if isNull result then one (Value.int n) else result)
+        regIn utf8lib "codepoint" (fun a ->
+            let s = checkBytes 1 "utf8.codepoint" a
+            let len = s.Length
+            let posi = posrelat (optInt 2 "utf8.codepoint" interp a 1L) len
+            let pose = posrelat (optInt 3 "utf8.codepoint" interp a posi) len
+            let lax = (arg a 3).IsTruthy
+            if posi < 1L then err "bad argument #2 to 'utf8.codepoint' (out of bounds)"
+            if pose > int64 len then err "bad argument #3 to 'utf8.codepoint' (out of bounds)"
+            if posi > pose then emptyValues
+            else
+                let out = ResizeArray<Value>()
+                let mutable i = int posi - 1
+                while i < int pose do
+                    match decode s i (not lax) with
+                    | ValueNone -> err "invalid UTF-8 code"
+                    | ValueSome(struct (code, next)) ->
+                        out.Add(Value.int code)
+                        i <- next
+                out.ToArray())
+        regIn utf8lib "offset" (fun a ->
+            let s = checkBytes 1 "utf8.offset" a
+            let len = s.Length
+            let mutable n = checkInt 2 "utf8.offset" interp a
+            let mutable posi = posrelat (optInt 3 "utf8.offset" interp a (if n >= 0L then 1L else int64 len + 1L)) len
+            if not (1L <= posi && posi - 1L <= int64 len) then err "bad argument #3 to 'utf8.offset' (position out of bounds)"
+            posi <- posi - 1L
+            if n = 0L then
+                while posi > 0L && isCont s (int posi) do posi <- posi - 1L
+            else
+                if isCont s (int posi) then err "initial position is a continuation byte"
+                if n < 0L then
+                    while n < 0L && posi > 0L do
+                        posi <- posi - 1L
+                        while posi > 0L && isCont s (int posi) do posi <- posi - 1L
+                        n <- n + 1L
+                else
+                    n <- n - 1L
+                    while n > 0L && posi < int64 len do
+                        posi <- posi + 1L
+                        while isCont s (int posi) do posi <- posi + 1L
+                        n <- n - 1L
+            one (if n = 0L then Value.int (posi + 1L) else Value.Nil))
+        let codesIter strict = func "utf8.codes.iterator" (fun b ->
+            let s = checkBytes 1 "for iterator" b
+            let len = s.Length
+            let mutable n = match interp.ToInteger(arg b 1) with ValueSome i -> i | ValueNone -> 0L
+            if n >= 0L && n < int64 len then
+                while isCont s (int n) do n <- n + 1L
+            if n < 0L || n >= int64 len then emptyValues
+            else
+                match decode s (int n) strict with
+                | ValueSome(struct (code, next)) when not (isCont s next) -> [| Value.int (n + 1L); Value.int code |]
+                | _ -> err "invalid UTF-8 code")
+        let strictIter, laxIter = codesIter true, codesIter false
+        regIn utf8lib "codes" (fun a ->
+            let s = checkBytes 1 "utf8.codes" a
+            if isCont s 0 then err "bad argument #1 to 'utf8.codes' (invalid UTF-8 code)"
+            [| (if (arg a 1).IsTruthy then laxIter else strictIter); arg a 0; Value.int 0L |])
 
         // ---- globals self-reference & version -----------------------------
 

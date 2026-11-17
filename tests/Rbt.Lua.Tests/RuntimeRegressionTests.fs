@@ -175,3 +175,29 @@ let ``sparse integer keys migrate into the array part when the gap fills`` () =
         for i, v in ipairs(t) do s = s + v end
         return (before == 0 or before == 100), #t == 100, s == 5050
     """
+
+[<Fact>]
+let ``host strings cross the boundary as UTF-8 and raw bytes stay exact`` () =
+    let lua = Lua()
+    // Host text in, Lua byte semantics inside.
+    lua.SetGlobal("greeting", Value.str "héllo ✓")
+    let r = lua.DoString("return #greeting, greeting:upper(), greeting:sub(2, 3), string.char(0xff, 0)")
+    Assert.Equal(10L, r.[0].Int)
+    Assert.Equal("HéLLO ✓", r.[1].Str)
+    Assert.Equal("é", r.[2].Str)
+    // Invalid UTF-8 decodes with replacement characters; Bytes is exact.
+    Assert.Equal("�\u0000", r.[3].Str)
+    Assert.Equal<byte[]>([| 0xFFuy; 0uy |], r.[3].Bytes)
+    Assert.True(Value.Eq(Value.str "é", Value.bytes [| 0xC3uy; 0xA9uy |]))
+    // Host functions read text or bytes and return either.
+    lua.SetGlobal("shout", Host.make lua.Interp "shout" (Host.lua {
+        let! s = Host.str
+        return s.ToUpperInvariant() + "!" }))
+    lua.SetGlobal("size", Host.make lua.Interp "size" (Host.lua {
+        let! b = Host.bytes
+        return b.Length }))
+    let h = lua.DoString("return shout('ça'), size('ça'), size('\\xff\\0')")
+    Assert.Equal("ÇA!", h.[0].Str)
+    Assert.Equal(3L, h.[1].Int)
+    Assert.Equal(2L, h.[2].Int)
+    Assert.Equal("ÇA!", lua.Interp.ToDisplayString h.[0])

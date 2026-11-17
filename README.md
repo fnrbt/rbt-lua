@@ -72,8 +72,9 @@ source ──▶ Lexer ──▶ Parser ──▶ Compiler (name resolution)
   `Interp.Call` stop CPU-only Lua. Checks are bounded and cross nested calls, coroutines
   and `pcall`/`xpcall`; protected Lua cannot turn cancellation into an ordinary error.
   A cancelled call leaves the interpreter reusable.
-* **Output** — `print` and `io.write` write to `Interp.Output` (`io.read` reads
-  `Interp.Input`); both default to the current console.
+* **Output** — `print` and `io.write` write raw bytes to `Interp.OutputStream` when it
+  is set (the CLI does this), otherwise UTF-8-decoded text to `Interp.Output`;
+  `io.read` reads `Interp.Input`. Both default to the current console.
 * **Limits** — register stacks grow to 1M slots (`stack overflow` beyond); host-boundary
   re-entry is limited to 200 levels (`C stack overflow`), so runaway metamethod recursion
   is a Lua error rather than a crashed process.
@@ -88,11 +89,17 @@ metatables (`__index`, `__newindex`, `__add`/…, `__eq`, `__lt`, `__call`, `__t
 `__len`, `__concat`, …), closures/upvalues, varargs and multiple returns, numeric and
 generic `for`, `while`/`repeat`, method calls, `pcall`/`xpcall`/`error`, coroutines, and a
 standard library: base, `coroutine`, `math`, `string` (including Lua pattern matching:
-`find`/`match`/`gmatch`/`gsub` and `string.format`), `table`, `os`, `io`. Calls in
-`return f(...)` position are proper tail calls. (Not yet:
-`goto`/labels, full `_ENV`, `load`, `utf8`, `debug`,
-byte-accurate non-ASCII strings, or local `<const>`/`<close>` attributes. Unsupported
-local attributes are rejected with a syntax error rather than silently ignored.)
+`find`/`match`/`gmatch`/`gsub`, `string.format` and `string.pack`/`unpack`), `utf8`,
+`table`, `os`, `io`. Calls in `return f(...)` position are proper tail calls. (Not yet:
+`goto`/labels, full `_ENV`, `load`, `debug`, or local `<const>`/`<close>` attributes.
+Unsupported local attributes are rejected with a syntax error rather than silently
+ignored.)
+
+Strings are byte sequences, as in C Lua: `#s`, `string.sub`/`byte`/`char`, comparison
+and patterns work on bytes, character classes follow the C locale (ASCII), and `\x`,
+`\ddd` and `\u{...}` escapes produce exact bytes (UTF-8 for `\u`). Source text and
+host strings are UTF-8: `Value.str` encodes host text, `Value.bytes` wraps raw bytes,
+`v.Str` decodes (invalid sequences become U+FFFD) and `v.Bytes` returns the exact data.
 
 Numeric comparisons preserve integer precision when mixed with floats, including
 64-bit boundaries. Indexed assignment captures targets before evaluating the RHS.
@@ -111,8 +118,8 @@ dotnet test tests/Rbt.Lua.Tests -c Release
 
 The suite also runs the scripts in `tests/Rbt.Lua.Tests/differential/` and compares
 their output byte-for-byte with output recorded from C Lua 5.4.7 (number formatting,
-`string.format`, the string and table libraries, metatables, coroutines, and library
-error messages). After adding or changing a script, regenerate the expected output
+`string.format`, byte strings, `utf8`, `string.pack`, the string and table libraries,
+metatables, coroutines, and library error messages). After adding or changing a script, regenerate the expected output
 with a reference interpreter:
 
 ```bash
@@ -137,9 +144,6 @@ Remaining items:
   interrupts pathological matching, but calls without a cancellation token have
   no work budget. A configurable work/frame budget needs a separate API and
   compatibility decision; no arbitrary limit is imposed here.
-* **String compatibility:** byte-accurate non-ASCII strings and Lua character-class
-  behavior remain incomplete; the pattern rewrite retains the current character
-  representation.
 * **Language coverage:** `<const>`/`<close>` remain explicitly rejected; `goto`/labels
   and full `_ENV` remain unsupported.
 * **Remaining C-call boundaries:** metamethods (`__index` functions, `__add`, …) and

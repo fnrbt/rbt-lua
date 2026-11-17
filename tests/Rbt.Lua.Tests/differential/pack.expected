@@ -1,0 +1,13 @@
+01000000	00000001	feff	80	ff	ffffffffffffffff
+563412	123456	fdffffffffffffffffffffffffffffff	00000000000000000000000000000005	0700000000000000
+0000c03f	bfb999999999999a	555555555555d53f	026869	616200	6162630000
+0100000002000000	01000000000000000000000000000040	0100000200	0100000002	010000010100
+4	16	12	10	0
+-77	258	-1	255	3
+nul	len	fix	12
+3.1415926535898	20	9
+9	-12345	1099511627776	10
+false	false	false	false	false	bad argument #2 to 'string.pack' (string contains zeros)
+false	false	false	false	false	bad argument #2 to 'string.pack' (number expected, got nil)
+false	false	false	false	bad argument #3 to 'string.unpack' (initial position out of string)
+false	false	false	1	5
