@@ -8,16 +8,18 @@ module Numbers =
 
     let private inv = CultureInfo.InvariantCulture
 
-    /// Format a float the way Lua's default `%.14g` does, always keeping a float
-    /// look (so `1.0` prints as "1.0", not "1").
-    let floatToString (f: double) : string =
-        if Double.IsNaN f then "nan"
+    /// C `%.14g` (LUAI_NUMFFORMAT), as used by io.write.
+    let floatG14 (f: double) : string =
+        if Double.IsNaN f then (if Double.IsNegative f then "-nan" else "nan")
         elif Double.IsPositiveInfinity f then "inf"
         elif Double.IsNegativeInfinity f then "-inf"
-        else
-            let s = f.ToString("G14", inv).Replace("E", "e")
-            // ensure exponent has a sign+2 digits like C printf (e+15 not e15)? G14 yields e+15.
-            if s.IndexOfAny [| '.'; 'e'; 'n'; 'i' |] < 0 then s + ".0" else s
+        else f.ToString("G14", inv).Replace("E", "e")
+
+    /// tostring for floats: `%.14g`, but always keeping a float look (so `1.0`
+    /// prints as "1.0", not "1").
+    let floatToString (f: double) : string =
+        let s = floatG14 f
+        if s.IndexOfAny [| '.'; 'e'; 'n'; 'i' |] < 0 then s + ".0" else s
 
     let toString (v: Value) : string =
         match v.Tag with

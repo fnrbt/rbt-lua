@@ -1,0 +1,17 @@
+-- string library on ASCII text
+local s = "Hello, World"
+print(#s, s:upper(), s:lower(), s:len(), s:reverse(), s:rep(2, "-"), ("ab"):rep(0))
+print(s:sub(1, 5), s:sub(-5), s:sub(3, -3), s:sub(0), s:sub(20), s:sub(-100, 2))
+print(s:byte(), s:byte(-1), s:byte(1, 3), string.char(72, 105, 33))
+print(s:find("World"), s:find("o", 6), s:find("l+"), s:find(".", 1, true), s:find("xyz"))
+print(s:match("(%a+), (%a+)"), s:match("%d"), ("key = value"):match("^(%w+)%s*=%s*(%w+)$"))
+print(("hello world from lua"):gsub("%w+", string.upper))
+print(("hello"):gsub("", "-"), ("abc"):gsub("%w", "%0%0"), ("x=1,y=2"):gsub("(%w)=(%w)", "%2=%1"))
+print(("$name is $age"):gsub("%$(%w+)", {name = "Ann", age = 30}))
+for k, v in ("a=1, b=2, c=3"):gmatch("(%w+)=(%w+)") do io.write(k, ":", v, " ") end print()
+print(("  trim me  "):match("^%s*(.-)%s*$"), ("[[x]]"):find("[[", 1, true), ("f(a,b)"):match("%((.-)%)"))
+print(("%d+"):gsub("%%", "%%%%"), ("THE (quick) fox"):find("%((%a+)%)"), ("aaa"):match("a-"), ("aaa"):match("a-$"))
+print(("one two  three"):gsub("%s+", " "), ("abc"):byte(10), ("x"):rep(3, ","), tostring(nil), tostring(true))
+print(string.format("%s|%s|%s", 1, 2.5, "x"), ("CamelCaseString"):gsub("(%u)", " %1"))
+print(("balanced (a(b)c) end"):match("%b()"), ("THE END"):lower():gsub("^%l", string.upper), ("a.b.c"):gsub("%.", "/"))
+print(("f00 bar99"):match("%a+(%d+)"), ("--x--"):match("^%-*(.-)%-*$"), ("A1b2"):gsub("%d", {["1"]="one"}))

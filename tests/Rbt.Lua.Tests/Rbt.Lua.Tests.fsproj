@@ -10,9 +10,14 @@
     <Compile Include="LanguageRegressionTests.fs" />
     <Compile Include="RuntimeRegressionTests.fs" />
     <Compile Include="PatternTests.fs" />
+    <Compile Include="DifferentialTests.fs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.1" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <ProjectReference Include="../../src/Rbt.Lua/Rbt.Lua.fsproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="differential/*.lua;differential/*.expected" CopyToOutputDirectory="PreserveNewest" LinkBase="differential" />
+  </ItemGroup>
+
 </Project>

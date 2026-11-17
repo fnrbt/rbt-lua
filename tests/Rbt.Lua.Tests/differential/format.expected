@@ -1,0 +1,15 @@
+0|2|2|-0|0.1|1.00|2.001
+0.0001|1e-05|100000|1e+06|0.0001234|123456|1.23457e+06|-0
+3.14|0.3333333333|1.00000|9.22337e+18|1e+100
+0.000000e+00|1.234560E+02|6e+00|1.000000e-310|-1.000000e+300
+     3.142|1.23e+03  |+2.2| 42|   +7|-7   |
+   ab|ab   |ab|    x|true
+deadbeef|BEEF|0xff|100|010|-003.142|  A|
+9223372036854775807|-9223372036854775808|   03|
+"tab\9here\
+newline \"quoted\" back\\slash \0001 nul\0end \13\127"
+0x1p-1|-0x1p+1|0x1.7e43c8800759cp+996|true|nil
+0x0.012688b70e62bp-1022|0x0.0000000000001p-1022|0x1.fffffffffffffp+0|0x2p+0|0x2.0p+0|0x1.999999999999ap-4|0x1.999999999999a00p-4
+%|Lua	false	bad argument #2 to 'string.format' (no value)
+1 1.5 -0.0	3	false	bad argument #2 to 'string.format' (number has no integer representation)
+1e+100	-1e-100	123456789012345	0.3	1e+15	9.007199254741e+15

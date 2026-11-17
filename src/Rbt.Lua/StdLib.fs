@@ -15,26 +15,38 @@ module StdLib =
     let private badArg n fn expected (got: Value) =
         err (sprintf "bad argument #%d to '%s' (%s expected, got %s)" n fn expected (Value.typeName got))
 
+    /// Like badArg, but says "no value" for a missing argument, as Lua does.
+    let private badArgOf n fn expected (a: Value[]) =
+        let got = if n - 1 < a.Length then Value.typeName a.[n - 1] else "no value"
+        err (sprintf "bad argument #%d to '%s' (%s expected, got %s)" n fn expected got)
+
+    let private checkAny n fn (a: Value[]) =
+        if n - 1 >= a.Length then err (sprintf "bad argument #%d to '%s' (value expected)" n fn)
+
     let private checkTable n fn (a: Value[]) =
         let v = arg a (n - 1)
-        if v.Tag = Tag.Table then v.Obj :?> LuaTable else badArg n fn "table" v
+        if v.Tag = Tag.Table then v.Obj :?> LuaTable else badArgOf n fn "table" a
 
     let private checkStr n fn (a: Value[]) =
         let v = arg a (n - 1)
         match v.Tag with
         | Tag.Str -> v.Obj :?> string
         | Tag.Int | Tag.Float -> Numbers.toString v
-        | _ -> badArg n fn "string" v
+        | _ -> badArgOf n fn "string" a
 
     let private checkInt n fn (interp: Interp) (a: Value[]) =
-        match interp.ToInteger(arg a (n - 1)) with
+        let v = arg a (n - 1)
+        match interp.ToInteger v with
         | ValueSome i -> i
-        | ValueNone -> badArg n fn "number" (arg a (n - 1))
+        | ValueNone ->
+            match interp.ToNumber v with
+            | ValueSome _ -> err (sprintf "bad argument #%d to '%s' (number has no integer representation)" n fn)
+            | ValueNone -> badArgOf n fn "number" a
 
     let private checkNum n fn (interp: Interp) (a: Value[]) =
         match interp.ToNumber(arg a (n - 1)) with
         | ValueSome v -> interp.ToFloat v
-        | ValueNone -> badArg n fn "number" (arg a (n - 1))
+        | ValueNone -> badArgOf n fn "number" a
 
     let private optInt n fn interp (a: Value[]) (def: int64) =
         if (arg a (n - 1)).IsNil then def else checkInt n fn interp a
@@ -43,14 +55,19 @@ module StdLib =
         let G = interp.Globals
         let func name fn = funcVal (Builtin(name, fn))
         let reg name fn = G.Set(Value.str name, func name fn)
+        // Library functions report errors under their qualified name
+        // ('string.format'), as Lua 5.4 does.
+        let libNames = Collections.Generic.Dictionary<LuaTable, string>(HashIdentity.Reference)
         let newLib name =
             let t = LuaTable()
             G.Set(Value.str name, tableVal t)
+            libNames.[t] <- name
             t
-        let regIn (t: LuaTable) name fn = t.Set(Value.str name, func name fn)
+        let qualified (t: LuaTable) name = match libNames.TryGetValue t with | true, lib -> lib + "." + name | _ -> name
+        let regIn (t: LuaTable) name fn = t.Set(Value.str name, func (qualified t name) fn)
         // DSL-based definitions (see Host.fs): typed CE, auto marshalling/diagnostics.
         let def name body = G.Set(Value.str name, Host.make interp name body)
-        let defIn (t: LuaTable) name body = t.Set(Value.str name, Host.make interp name body)
+        let defIn (t: LuaTable) name body = t.Set(Value.str name, Host.make interp (qualified t name) body)
 
         // ---- base library -------------------------------------------------
 
@@ -59,7 +76,7 @@ module StdLib =
             for i in 0 .. a.Length - 1 do
                 if i > 0 then sb.Append '\t' |> ignore
                 sb.Append(interp.ToDisplayString a.[i]) |> ignore
-            Console.Out.WriteLine(sb.ToString())
+            interp.Out.Write(sb.Append('\n').ToString())
             emptyValues)
 
         def "type" (lua { let! v = value in return Value.typeName v })
@@ -68,7 +85,9 @@ module StdLib =
         reg "tonumber" (fun a ->
             if a.Length >= 2 && not a.[1].IsNil then
                 let s = (checkStr 1 "tonumber" a).Trim()
-                let b = int (checkInt 2 "tonumber" interp a)
+                let b = checkInt 2 "tonumber" interp a
+                if b < 2L || b > 36L then err "bad argument #2 to 'tonumber' (base out of range)"
+                let b = int b
                 try
                     let mutable acc = 0L
                     let mutable ok = s.Length > 0
@@ -93,7 +112,7 @@ module StdLib =
             match v.Tag with
             | Tag.Table -> one (Value.int (v.Obj :?> LuaTable).Length)
             | Tag.Str -> one (Value.int (int64 (v.Obj :?> string).Length))
-            | _ -> err "table or string expected")
+            | _ -> badArgOf 1 "rawlen" "table or string" a)
 
         reg "setmetatable" (fun a ->
             let t = checkTable 1 "setmetatable" a
@@ -145,6 +164,7 @@ module StdLib =
                 [| nextFn; v; Value.Nil |])
 
         reg "ipairs" (fun a ->
+            checkAny 1 "ipairs" a
             let v = arg a 0
             let iter = func "ipairs.iterator" (fun b ->
                 let i = (arg b 1).Int + 1L
@@ -152,7 +172,22 @@ module StdLib =
                 if x.IsNil then one Value.Nil else [| Value.int i; x |])
             [| iter; v; Value.int 0L |])
 
-        reg "collectgarbage" (fun _ -> one (Value.int 0L))
+        // Memory is managed by the .NET GC; collectgarbage only reports and
+        // answers with the types Lua code expects.
+        let mutable gcMode = "incremental"
+        reg "collectgarbage" (fun a ->
+            let opt = if (arg a 0).IsNil then "collect" else checkStr 1 "collectgarbage" a
+            match opt with
+            | "collect" | "stop" | "restart" -> one (Value.int 0L)
+            | "count" -> one (Value.float (float (GC.GetTotalMemory false) / 1024.0))
+            | "step" -> one Value.False
+            | "isrunning" -> one Value.True
+            | "incremental" | "generational" ->
+                let previous = gcMode
+                gcMode <- opt
+                one (Value.str previous)
+            | "setpause" | "setstepmul" -> one (Value.int 0L)
+            | _ -> err (sprintf "bad argument #1 to 'collectgarbage' (invalid option '%s')" opt))
 
         // ---- math ---------------------------------------------------------
 
@@ -172,30 +207,40 @@ module StdLib =
         m1 "rad" (fun d -> d * Math.PI / 180.0)
         m1 "deg" (fun d -> d * 180.0 / Math.PI)
         regIn math "atan" (fun a ->
-            let y = checkNum 1 "atan" interp a
-            let x = if (arg a 1).IsNil then 1.0 else checkNum 2 "atan" interp a
+            let y = checkNum 1 "math.atan" interp a
+            let x = if (arg a 1).IsNil then 1.0 else checkNum 2 "math.atan" interp a
             one (Value.float (Math.Atan2(y, x))))
         regIn math "log" (fun a ->
-            let x = checkNum 1 "log" interp a
+            let x = checkNum 1 "math.log" interp a
             if (arg a 1).IsNil then one (Value.float (Math.Log x))
-            else one (Value.float (Math.Log(x, checkNum 2 "log" interp a))))
-        defIn math "abs" (lua {
-            let! v = value
-            return (if v.Tag = Tag.Int then
-                        Value.int (if v.Int = Int64.MinValue then Int64.MinValue else abs v.Int)
-                    else Value.float (abs (interp.ToFloat (interp.AsNumber(v, "abs"))))) })
+            else one (Value.float (Math.Log(x, checkNum 2 "math.log" interp a))))
+        regIn math "abs" (fun a ->
+            let v = arg a 0
+            if v.Tag = Tag.Int then one (Value.int (if v.Int = Int64.MinValue then Int64.MinValue else abs v.Int))
+            else one (Value.float (abs (checkNum 1 "math.abs" interp a))))
         let floorCeil name (f: double -> double) =
-            defIn math name (lua {
-                let! v = value
-                return (if v.Tag = Tag.Int then v
-                        else
-                            let r = f (interp.ToFloat (interp.AsNumber(v, name)))
-                            if r >= -9.2e18 && r <= 9.2e18 then Value.int (int64 r) else Value.float r) })
+            regIn math name (fun a ->
+                let v = arg a 0
+                if v.Tag = Tag.Int then one v
+                else
+                    let r = f (checkNum 1 ("math." + name) interp a)
+                    match Value.TryExactInt64 r with
+                    | ValueSome i -> one (Value.int i)
+                    | ValueNone -> one (Value.float r))
         floorCeil "floor" Math.Floor
         floorCeil "ceil" Math.Ceiling
-        regIn math "fmod" (fun a -> one (Value.float (checkNum 1 "fmod" interp a % checkNum 2 "fmod" interp a)))
+        regIn math "fmod" (fun a ->
+            let x, y = arg a 0, arg a 1
+            if x.Tag = Tag.Int && y.Tag = Tag.Int then
+                let d = y.Int
+                if d = 0L then err "bad argument #2 to 'math.fmod' (zero)"
+                elif d = -1L then one (Value.int 0L)   // avoids overflow of mininteger % -1
+                else one (Value.int (x.Int % d))       // C remainder truncates toward zero
+            else one (Value.float (checkNum 1 "math.fmod" interp a % checkNum 2 "math.fmod" interp a)))
+        regIn math "ult" (fun a ->
+            one (Value.ofBool (uint64 (checkInt 1 "math.ult" interp a) < uint64 (checkInt 2 "math.ult" interp a))))
         regIn math "modf" (fun a ->
-            let x = checkNum 1 "modf" interp a
+            let x = checkNum 1 "math.modf" interp a
             let ip = Math.Truncate x
             [| (if ip >= -9.2e18 && ip <= 9.2e18 then Value.float ip else Value.float ip); Value.float (x - ip) |])
         defIn math "max" (lua {
@@ -206,7 +251,9 @@ module StdLib =
             let! first = value
             let! more = rest
             return (Array.fold (fun m v -> if interp.Less(v, m) then v else m) first more) })
-        regIn math "tointeger" (fun a -> match interp.ToInteger(arg a 0) with ValueSome i -> one (Value.int i) | ValueNone -> one Value.Nil)
+        regIn math "tointeger" (fun a ->
+            checkAny 1 "math.tointeger" a
+            match interp.ToInteger(arg a 0) with ValueSome i -> one (Value.int i) | ValueNone -> one Value.Nil)
         regIn math "type" (fun a ->
             match (arg a 0).Tag with
             | Tag.Int -> one (Value.str "integer")
@@ -217,11 +264,13 @@ module StdLib =
         regIn math "random" (fun a ->
             if a.Length = 0 then one (Value.float (rng.NextDouble()))
             elif a.Length = 1 then
-                let m = checkInt 1 "random" interp a
+                let m = checkInt 1 "math.random" interp a
+                if m < 1L then err "bad argument #1 to 'math.random' (interval is empty)"
                 one (Value.int (int64 (rng.NextDouble() * double m) + 1L))
             else
-                let lo = checkInt 1 "random" interp a
-                let hi = checkInt 2 "random" interp a
+                let lo = checkInt 1 "math.random" interp a
+                let hi = checkInt 2 "math.random" interp a
+                if lo > hi then err "bad argument #1 to 'math.random' (interval is empty)"
                 one (Value.int (lo + int64 (rng.NextDouble() * double (hi - lo + 1L)))))
 
         // ---- string -------------------------------------------------------
@@ -262,42 +311,42 @@ module StdLib =
                          sb.Append s |> ignore
                      sb.ToString()) })
         regIn strlib "byte" (fun a ->
-            let s = checkStr 1 "byte" a
+            let s = checkStr 1 "string.byte" a
             let len = s.Length
-            let i = let ii = optInt 2 "byte" interp a 1L in if ii < 0L then len + int ii + 1 else int ii
-            let j = let jj = optInt 3 "byte" interp a (int64 i) in if jj < 0L then len + int jj + 1 else int jj
+            let i = let ii = optInt 2 "string.byte" interp a 1L in if ii < 0L then len + int ii + 1 else int ii
+            let j = let jj = optInt 3 "string.byte" interp a (int64 i) in if jj < 0L then len + int jj + 1 else int jj
             let i = max 1 i
             let j = min len j
             if i > j then emptyValues
             else Array.init (j - i + 1) (fun k -> Value.int (int64 (int s.[i - 1 + k]))))
         regIn strlib "char" (fun a ->
             let sb = StringBuilder()
-            for i in 0 .. a.Length - 1 do sb.Append(char (int (checkInt (i + 1) "char" interp a))) |> ignore
+            for i in 0 .. a.Length - 1 do sb.Append(char (int (checkInt (i + 1) "string.char" interp a))) |> ignore
             one (Value.str (sb.ToString())))
 
         regIn strlib "format" (fun a -> one (Value.str (Format.format interp (checkStr 1 "format" a) a)))
 
         regIn strlib "find" (fun a ->
-            let s = checkStr 1 "find" a
-            let pat = checkStr 2 "find" a
-            let init = int (optInt 3 "find" interp a 1L)
+            let s = checkStr 1 "string.find" a
+            let pat = checkStr 2 "string.find" a
+            let init = int (optInt 3 "string.find" interp a 1L)
             let plain = (arg a 3).IsTruthy
             LuaPattern.find interp.Tick s pat init plain)
         regIn strlib "match" (fun a ->
-            let s = checkStr 1 "match" a
-            let pat = checkStr 2 "match" a
-            let init = int (optInt 3 "match" interp a 1L)
+            let s = checkStr 1 "string.match" a
+            let pat = checkStr 2 "string.match" a
+            let init = int (optInt 3 "string.match" interp a 1L)
             LuaPattern.matchOne interp.Tick s pat init)
         regIn strlib "gmatch" (fun a ->
-            let s = checkStr 1 "gmatch" a
-            let pat = checkStr 2 "gmatch" a
+            let s = checkStr 1 "string.gmatch" a
+            let pat = checkStr 2 "string.gmatch" a
             let it = LuaPattern.gmatch interp.Tick s pat
             one (func "gmatch.iterator" (fun _ -> it ())))
         regIn strlib "gsub" (fun a ->
-            let s = checkStr 1 "gsub" a
-            let pat = checkStr 2 "gsub" a
+            let s = checkStr 1 "string.gsub" a
+            let pat = checkStr 2 "string.gsub" a
             let repl = arg a 2
-            let maxN = if (arg a 3).IsNil then Int32.MaxValue else int (checkInt 4 "gsub" interp a)
+            let maxN = if (arg a 3).IsNil then Int32.MaxValue else int (checkInt 4 "string.gsub" interp a)
             let apply (caps: Value[]) (mStart: int) (mEnd: int) : string voption =
                 let whole = s.Substring(mStart, mEnd - mStart)
                 match repl.Tag with
@@ -324,7 +373,7 @@ module StdLib =
                 | Tag.Func ->
                     let v = (interp.Call(repl, caps)) |> firstOrNil
                     if v.IsTruthy then ValueSome(Numbers.toString v) else ValueNone
-                | _ -> err "bad argument #3 to 'gsub' (string/function/table expected)"
+                | _ -> badArgOf 3 "string.gsub" "string/function/table" a
             let result, count = LuaPattern.gsub interp.Tick s pat maxN apply
             [| Value.str result; Value.int (int64 count) |])
 
@@ -332,12 +381,12 @@ module StdLib =
 
         let tablib = newLib "table"
         regIn tablib "insert" (fun a ->
-            let t = checkTable 1 "insert" a
+            let t = checkTable 1 "table.insert" a
             if a.Length <= 2 then t.Set(Value.int (t.Length + 1L), arg a 1)
             else
-                let pos = checkInt 2 "insert" interp a
+                let pos = checkInt 2 "table.insert" interp a
                 let n = t.Length
-                if pos < 1L || pos > n + 1L then err "bad argument #2 to 'insert' (position out of bounds)"
+                if pos < 1L || pos > n + 1L then err "bad argument #2 to 'table.insert' (position out of bounds)"
                 let mutable i = n
                 while i >= pos do
                     t.Set(Value.int (i + 1L), t.Get(Value.int i))
@@ -345,11 +394,11 @@ module StdLib =
                 t.Set(Value.int pos, arg a 2)
             emptyValues)
         regIn tablib "remove" (fun a ->
-            let t = checkTable 1 "remove" a
+            let t = checkTable 1 "table.remove" a
             let n = t.Length
-            let pos = optInt 2 "remove" interp a n
+            let pos = optInt 2 "table.remove" interp a n
             if pos <> n && (pos < 1L || pos > n + 1L) then
-                err "bad argument #2 to 'remove' (position out of bounds)"
+                err "bad argument #2 to 'table.remove' (position out of bounds)"
             let removed = t.Get(Value.int pos)
             let mutable i = pos
             while i < n do
@@ -358,33 +407,59 @@ module StdLib =
             t.Set(Value.int i, Value.Nil)
             one removed)
         regIn tablib "concat" (fun a ->
-            let t = checkTable 1 "concat" a
-            let sep = if (arg a 1).IsNil then "" else checkStr 2 "concat" a
-            let i = optInt 3 "concat" interp a 1L
-            let j = optInt 4 "concat" interp a t.Length
+            let t = checkTable 1 "table.concat" a
+            let sep = if (arg a 1).IsNil then "" else checkStr 2 "table.concat" a
+            let i = optInt 3 "table.concat" interp a 1L
+            let j = optInt 4 "table.concat" interp a t.Length
             let sb = StringBuilder()
             let mutable k = i
             while k <= j do
                 let v = t.Get(Value.int k)
                 match v.Tag with
                 | Tag.Str | Tag.Int | Tag.Float -> sb.Append(Numbers.toString v) |> ignore
-                | _ -> err (sprintf "invalid value (at index %d) in table for 'concat'" k)
+                | _ -> err (sprintf "invalid value (%s) at index %d in table for 'concat'" (Value.typeName v) k)
                 if k < j then sb.Append sep |> ignore
                 k <- k + 1L
             one (Value.str (sb.ToString())))
+        regIn tablib "move" (fun a ->
+            let a1 = arg a 0
+            if a1.Tag <> Tag.Table then badArg 1 "table.move" "table" a1 |> ignore
+            let f = checkInt 2 "table.move" interp a
+            let e = checkInt 3 "table.move" interp a
+            let t = checkInt 4 "table.move" interp a
+            let a2 = if (arg a 4).IsNil then a1 else arg a 4
+            if a2.Tag <> Tag.Table then badArg 5 "table.move" "table" a2 |> ignore
+            if e >= f then
+                if not (f > 0L || e < Int64.MaxValue + f) then err "bad argument #3 to 'table.move' (too many elements to move)"
+                let n = e - f + 1L
+                if t > Int64.MaxValue - n + 1L then err "bad argument #4 to 'table.move' (destination wrap around)"
+                // Copy backwards when moving right within one table, so sources
+                // are read before they are overwritten.
+                if t > e || t <= f || not (obj.ReferenceEquals(a1.Obj, a2.Obj)) then
+                    for i in 0L .. n - 1L do interp.SetIndex(a2, Value.int (t + i), interp.Index(a1, Value.int (f + i)))
+                else
+                    for i in n - 1L .. -1L .. 0L do interp.SetIndex(a2, Value.int (t + i), interp.Index(a1, Value.int (f + i)))
+            one a2)
         regIn tablib "unpack" (fun a ->
-            let t = checkTable 1 "unpack" a
-            let i = optInt 2 "unpack" interp a 1L
-            let j = optInt 3 "unpack" interp a t.Length
+            // Like C Lua: no table check; length and elements go through metamethods.
+            let t = arg a 0
+            let i = optInt 2 "table.unpack" interp a 1L
+            let j =
+                if (arg a 2).IsNil then
+                    match interp.ToInteger(interp.Unary(Len, t)) with
+                    | ValueSome n -> n
+                    | ValueNone -> err "object length is not an integer"
+                else checkInt 3 "table.unpack" interp a
             if i > j then emptyValues
-            else Array.init (int (j - i + 1L)) (fun k -> t.Get(Value.int (i + int64 k))))
+            elif j - i >= 1000000L then err "too many results to unpack"
+            else Array.init (int (j - i + 1L)) (fun k -> interp.Index(t, Value.int (i + int64 k))))
         regIn tablib "pack" (fun a ->
             let t = LuaTable()
             for i in 0 .. a.Length - 1 do t.Set(Value.int (int64 i + 1L), a.[i])
             t.Set(Value.str "n", Value.int (int64 a.Length))
             one (tableVal t))
         regIn tablib "sort" (fun a ->
-            let t = checkTable 1 "sort" a
+            let t = checkTable 1 "table.sort" a
             let n = int t.Length
             let items = Array.init n (fun k -> t.Get(Value.int (int64 k + 1L)))
             let cmp = arg a 1
@@ -410,20 +485,23 @@ module StdLib =
         regIn oslib "clock" (fun _ -> one (Value.float (double sw.ElapsedTicks / double System.Diagnostics.Stopwatch.Frequency)))
         regIn oslib "time" (fun _ -> one (Value.int (DateTimeOffset.UtcNow.ToUnixTimeSeconds())))
         regIn oslib "date" (fun a ->
-            let fmt = if (arg a 0).IsNil then "%c" else checkStr 1 "date" a
+            let fmt = if (arg a 0).IsNil then "%c" else checkStr 1 "os.date" a
             one (Value.str (DateTime.Now.ToString())))
         regIn oslib "getenv" (fun a ->
-            let v = Environment.GetEnvironmentVariable(checkStr 1 "getenv" a)
+            let v = Environment.GetEnvironmentVariable(checkStr 1 "os.getenv" a)
             one (if isNull v then Value.Nil else Value.str v))
 
         // ---- io (minimal) -------------------------------------------------
 
         let iolib = newLib "io"
         regIn iolib "write" (fun a ->
-            for v in a do Console.Out.Write(Numbers.toString v)
+            let w = interp.Out
+            for v in a do
+                // Numbers are written with C's %d / %.14g, not tostring.
+                w.Write(if v.Tag = Tag.Float then Numbers.floatG14 v.Float else Numbers.toString v)
             emptyValues)
         regIn iolib "read" (fun _ ->
-            let line = Console.In.ReadLine()
+            let line = interp.In.ReadLine()
             one (if isNull line then Value.Nil else Value.str line))
 
         // ---- globals self-reference & version -----------------------------

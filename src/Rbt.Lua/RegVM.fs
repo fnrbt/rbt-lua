@@ -17,7 +17,8 @@ module RegVM =
     type private Ctx =
         { Code: ResizeArray<Instr>
           Consts: ResizeArray<Value>
-          ConstMap: Dictionary<Value, int>
+          // Keyed by exact type and bits: Lua equality would merge 0 with 0.0.
+          ConstMap: Dictionary<struct (Tag * int64 * string), int>
           Children: ResizeArray<Proto>
           Groups: ResizeArray<(bool * int)[]>
           mutable Free: int
@@ -29,9 +30,10 @@ module RegVM =
     let private patchB (c: Ctx) i t = let x = c.Code.[i] in c.Code.[i] <- { x with B = t }
     let private reserve (c: Ctx) = let r = c.Free in c.Free <- c.Free + 1; (if c.Free > c.MaxReg then c.MaxReg <- c.Free); r
     let private konst (c: Ctx) v =
-        match c.ConstMap.TryGetValue v with
+        let key = struct (v.Tag, BitConverter.DoubleToInt64Bits v.Num, (match v.Obj with :? string as s -> s | _ -> null))
+        match c.ConstMap.TryGetValue key with
         | true, i -> i
-        | _ -> let i = c.Consts.Count in c.Consts.Add v; c.ConstMap.[v] <- i; i
+        | _ -> let i = c.Consts.Count in c.Consts.Add v; c.ConstMap.[key] <- i; i
     let private group (c: Ctx) g = let i = c.Groups.Count in c.Groups.Add g; i
     let private isMulti e = match e with CCall _ | CMethod _ | CVararg -> true | _ -> false
 
@@ -707,7 +709,7 @@ module RegVM =
                 let args = Vm.Args(co, fAbs + 1, nargs)
                 co.Top <- based + p.NumReg
                 if args.Length = 0 || args.[0].Tag <> Tag.Thread then
-                    luaError "bad argument #1 to 'resume' (coroutine expected)"
+                    luaError (sprintf "bad argument #1 to 'coroutine.resume' (thread expected, got %s)" (if args.Length = 0 then "no value" else Value.typeName args.[0]))
                 let target = args.[0].Obj :?> Coroutine
                 match Vm.ResumeError(interp, target) with
                 | null ->
@@ -1228,9 +1230,12 @@ module RegVM =
         let intrinsic name kind native = funcVal (Intrinsic(name, kind, native))
         let builtin name fn = funcVal (Builtin(name, fn))
         let thread (co: Coroutine) = Value.obj Tag.Thread co
+        let expected (a: Value[]) i fname what : 'a =
+            let got = if i < a.Length then Value.typeName a.[i] else "no value"
+            luaError (sprintf "bad argument #%d to '%s' (%s expected, got %s)" (i + 1) fname what got)
         let threadArg (a: Value[]) i fname : Coroutine =
             if i < a.Length && a.[i].Tag = Tag.Thread then a.[i].Obj :?> Coroutine
-            else luaError (sprintf "bad argument #%d to '%s' (coroutine expected)" (i + 1) fname)
+            else expected a i fname "coroutine"
         let rest (a: Value[]) i = if a.Length > i then a.[i..] else emptyValues
 
         set G "pcall" (intrinsic "pcall" IntrinsicKind.Pcall (fun i a ->
@@ -1244,20 +1249,21 @@ module RegVM =
 
         let co = LuaTable()
         set G "coroutine" (tableVal co)
-        let create (a: Value[]) =
-            if a.Length = 0 || a.[0].Tag <> Tag.Func then luaError "bad argument #1 to 'create' (function expected)"
+        let create fname (a: Value[]) =
+            if a.Length = 0 || a.[0].Tag <> Tag.Func then expected a 0 fname "function"
             let c = Coroutine(64, 4, false)
             c.Body <- a.[0]
             c
-        set co "create" (builtin "create" (fun a -> [| thread (create a) |]))
-        set co "wrap" (builtin "wrap" (fun a -> [| funcVal (WrapFn(create a)) |]))
-        set co "resume" (intrinsic "resume" IntrinsicKind.Resume (fun i a ->
-            Vm.ResumeNative(i, threadArg a 0 "resume", rest a 1, false)))
+        set co "create" (builtin "coroutine.create" (fun a -> [| thread (create "coroutine.create" a) |]))
+        set co "wrap" (builtin "coroutine.wrap" (fun a -> [| funcVal (WrapFn(create "coroutine.wrap" a)) |]))
+        set co "resume" (intrinsic "coroutine.resume" IntrinsicKind.Resume (fun i a ->
+            if a.Length = 0 || a.[0].Tag <> Tag.Thread then expected a 0 "coroutine.resume" "thread"
+            Vm.ResumeNative(i, a.[0].Obj :?> Coroutine, rest a 1, false)))
         set co "yield" (intrinsic "yield" IntrinsicKind.Yield (fun i _ ->
             if i.Current.IsRoot then luaError "attempt to yield from outside a coroutine"
             else luaError "attempt to yield across a C-call boundary"))
         set co "status" (builtin "status" (fun a ->
-            let c = threadArg a 0 "status"
+            let c = threadArg a 0 "coroutine.status"
             let s =
                 if obj.ReferenceEquals(c, interp.Current) then "running"
                 else
@@ -1269,10 +1275,10 @@ module RegVM =
         set co "running" (builtin "running" (fun _ ->
             [| thread interp.Current; Value.ofBool interp.Current.IsRoot |]))
         set co "isyieldable" (builtin "isyieldable" (fun a ->
-            let c = if a.Length > 0 then threadArg a 0 "isyieldable" else interp.Current
+            let c = if a.Length > 0 then threadArg a 0 "coroutine.isyieldable" else interp.Current
             [| Value.ofBool (not c.IsRoot && c.NativeDepth = 0) |]))
         set co "close" (builtin "close" (fun a ->
-            let c = threadArg a 0 "close"
+            let c = threadArg a 0 "coroutine.close"
             if obj.ReferenceEquals(c, interp.Current) then luaError "cannot close a running coroutine"
             match c.Status with
             | CoStatus.Suspended | CoStatus.Dead ->

@@ -1,0 +1,10 @@
+-- library argument errors (C functions report without positions)
+local function e(f, ...) local ok, msg = pcall(f, ...) print(ok, msg) end
+e(string.rep) e(string.sub) e(string.byte, {}) e(string.char, "x") e(string.format, "%d", "x")
+e(string.format, "%d", 1.5) e(string.format, "%y", 1) e(string.find, "a") e(string.gsub, "a", "a", true)
+e(table.insert, nil, 1) e(table.insert, {}, 5, 1) e(table.remove, {}, 5) e(table.concat, {{}})
+e(table.unpack) e(table.move, {}, 1, 2) e(table.sort, 1)
+e(math.floor, "x") e(math.fmod, 1, 0) e(math.random, 2, 1) e(math.tointeger) e(math.ult, 1.5, 2)
+e(setmetatable, 1, {}) e(setmetatable, {}, 1) e(select, 0) e(tonumber, "10", 99) e(ipairs)
+e(rawlen, 5) e(rawget, 1, 1) e(next, {}, "nope") e(coroutine.resume, 1) e(coroutine.wrap, 1)
+e(collectgarbage, "bogus") e(string.rep, "x", -1) e(string.format, "%c")

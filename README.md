@@ -72,6 +72,8 @@ source ──▶ Lexer ──▶ Parser ──▶ Compiler (name resolution)
   `Interp.Call` stop CPU-only Lua. Checks are bounded and cross nested calls, coroutines
   and `pcall`/`xpcall`; protected Lua cannot turn cancellation into an ordinary error.
   A cancelled call leaves the interpreter reusable.
+* **Output** — `print` and `io.write` write to `Interp.Output` (`io.read` reads
+  `Interp.Input`); both default to the current console.
 * **Limits** — register stacks grow to 1M slots (`stack overflow` beyond); host-boundary
   re-entry is limited to 200 levels (`C stack overflow`), so runaway metamethod recursion
   is a Lua error rather than a crashed process.
@@ -107,6 +109,16 @@ parsing/formatting, and cancellation:
 dotnet test tests/Rbt.Lua.Tests -c Release
 ```
 
+The suite also runs the scripts in `tests/Rbt.Lua.Tests/differential/` and compares
+their output byte-for-byte with output recorded from C Lua 5.4.7 (number formatting,
+`string.format`, the string and table libraries, metatables, coroutines, and library
+error messages). After adding or changing a script, regenerate the expected output
+with a reference interpreter:
+
+```bash
+LUA=/path/to/lua5.4 tests/Rbt.Lua.Tests/differential/regen.sh
+```
+
 ## Pattern execution and remaining work
 
 Pattern matching uses an iterative backtracking machine, not the .NET call stack.
@@ -125,10 +137,6 @@ Remaining items:
   interrupts pathological matching, but calls without a cancellation token have
   no work budget. A configurable work/frame budget needs a separate API and
   compatibility decision; no arbitrary limit is imposed here.
-* **Quoted NUL escaping:** `string.format("%q", string.char(0) .. "123")`
-  currently emits `"\0123"`, which parses as byte 12 followed by `"3"`, not NUL
-  followed by `"123"`. Emit an unambiguous three-digit escape before a digit and
-  add a round-trip regression.
 * **String compatibility:** byte-accurate non-ASCII strings and Lua character-class
   behavior remain incomplete; the pattern rewrite retains the current character
   representation.

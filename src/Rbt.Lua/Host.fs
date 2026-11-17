@@ -34,8 +34,9 @@ module Host =
     // `take` has already advanced past the offending argument, so its 1-based
     // index is `Pos - 1`.
     let private fail (c: Ctx) expected (got: Value) : 'a =
+        let gotName = if c.Pos - 2 < c.Args.Length then Value.typeName got else "no value"
         raise (LuaError(Value.str (sprintf "bad argument #%d to '%s' (%s expected, got %s)"
-                                       (c.Pos - 1) c.Fn expected (Value.typeName got))))
+                                       (c.Pos - 1) c.Fn expected gotName)))
 
     let private peek (c: Ctx) = if c.Pos - 1 < c.Args.Length then c.Args.[c.Pos - 1] else Value.Nil
     let private take (c: Ctx) = let v = peek c in c.Pos <- c.Pos + 1; v
@@ -43,7 +44,15 @@ module Host =
     // ---- typed argument readers ------------------------------------------
 
     let value : Reader<Value> = take
-    let integer : Reader<int64> = fun c -> let v = take c in match c.Interp.ToInteger v with ValueSome i -> i | ValueNone -> fail c "number" v
+    let integer : Reader<int64> = fun c ->
+        let v = take c
+        match c.Interp.ToInteger v with
+        | ValueSome i -> i
+        | ValueNone ->
+            match c.Interp.ToNumber v with
+            | ValueSome _ ->
+                raise (LuaError(Value.str (sprintf "bad argument #%d to '%s' (number has no integer representation)" (c.Pos - 1) c.Fn)))
+            | ValueNone -> fail c "number" v
     let number : Reader<float> = fun c -> let v = take c in match c.Interp.ToNumber v with ValueSome n -> c.Interp.ToFloat n | ValueNone -> fail c "number" v
     let str : Reader<string> = fun c ->
         let v = take c

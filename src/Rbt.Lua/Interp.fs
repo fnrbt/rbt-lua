@@ -145,6 +145,13 @@ and [<Sealed>] Interp() =
     member _.Globals = globals
     member _.StringMeta = stringMeta
 
+    /// Where `print` and `io.write` write; null means the current Console.Out.
+    member val Output : IO.TextWriter = null with get, set
+    /// Where `io.read` reads; null means the current Console.In.
+    member val Input : IO.TextReader = null with get, set
+    member internal this.Out = match this.Output with null -> Console.Out | w -> w
+    member internal this.In = match this.Input with null -> Console.In | r -> r
+
     /// The interpreter's main coroutine (the root sync calls run on).
     member _.Main = main
     /// The coroutine currently executing register-VM code.
@@ -328,7 +335,9 @@ and [<Sealed>] Interp() =
 
     member this.UnMeta(name: string, v: Value) : Value =
         let h = this.MetaField(v, Value.str name)
-        if h.IsNil then luaError (sprintf "attempt to perform arithmetic on a %s value" (Value.typeName v))
+        if h.IsNil then
+            let what = match name with "__len" -> "get length of" | "__bnot" -> "perform bitwise operation on" | _ -> "perform arithmetic on"
+            luaError (sprintf "attempt to %s a %s value" what (Value.typeName v))
         else firstOrNil (this.Call(h, [| v; v |]))
 
     /// Hot path: both operands integers. Falls back to the full dispatch otherwise.
