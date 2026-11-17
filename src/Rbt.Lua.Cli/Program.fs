@@ -30,7 +30,7 @@ let main argv =
     match argv with
     | [||] ->
         let lua, stdout = newState ()
-        eprintfn "fslua (Lua 5.4). Ctrl-D to exit."
+        eprintfn "rbt-lua (Lua 5.4). Ctrl-D to exit."
         let mutable go = true
         while go do
             Console.Out.Write "> "
@@ -48,5 +48,5 @@ let main argv =
     | [| "-e"; code |] -> runSource code "=(command line)"
     | [| path |] -> runSource (IO.File.ReadAllText path) path
     | _ ->
-        eprintfn "usage: fslua script.lua  |  -e \"code\""
+        eprintfn "usage: rbt-lua script.lua  |  -e \"code\""
         1

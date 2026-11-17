@@ -1,4 +1,4 @@
-# fslua
+# rbt-lua
 
 A Lua 5.4 interpreter for .NET, written in F#. Lua source is compiled to a
 register-based bytecode modeled on the reference Lua VM (register windows,
@@ -13,7 +13,7 @@ One run on a development machine (best of 5, ms; C Lua 5.4.7 built with its defa
 `-O2`, .NET 10):
 
 ```
-benchmark               fslua   C Lua   MoonSharp
+benchmark             rbt-lua   C Lua   MoonSharp
 fib(33)                   574     165        2683
 loop sum 1..30M           468      95        3053
 nested loop 6000^2        549     127        3266
@@ -26,7 +26,7 @@ coroutine gen 1M          170      73         466
 pcall+error 300k           72      47         849
 ```
 
-Overall fslua is roughly 3-4x slower than C Lua here, with the widest gaps on tight
+Overall rbt-lua is roughly 3-4x slower than C Lua here, with the widest gaps on tight
 arithmetic loops and the smallest on protected calls, coroutines and string building.
 Numbers vary noticeably between runs on this machine; treat them as rough.
 `BENCH_LOG.md` records the optimization history, including approaches that were

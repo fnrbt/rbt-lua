@@ -1,7 +1,7 @@
 # Benchmark log
 
 Times are **ms, lower = faster**. `reg vs moon` = MoonSharp time / register-VM time.
-fslua-only rounds use best-of-2 (`nomoon`); full rounds use best-of-3 with MoonSharp.
+rbt-lua-only rounds use best-of-2 (`nomoon`); full rounds use best-of-3 with MoonSharp.
 Hardware/runtime constant across rounds (.NET 10, Release).
 
 ## Baseline (best of 3, with MoonSharp) — three backends, semantics shared, only reg had int fast-paths

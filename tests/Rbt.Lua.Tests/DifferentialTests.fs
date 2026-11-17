@@ -30,4 +30,4 @@ let ``output matches C Lua 5.4`` (script: string) =
         let a = lines actual
         let firstDiff = Seq.zip e a |> Seq.tryFindIndex (fun (x, y) -> x <> y) |> Option.defaultValue (min e.Length a.Length)
         let line i (xs: string[]) = if i < xs.Length then xs.[i] else "<end of output>"
-        Assert.Fail(sprintf "%s: output differs from C Lua at line %d (bytes compared)\n  C Lua: %s\n  fslua: %s" script (firstDiff + 1) (line firstDiff e) (line firstDiff a))
+        Assert.Fail(sprintf "%s: output differs from C Lua at line %d (bytes compared)\n  C Lua: %s\n  rbt-lua: %s" script (firstDiff + 1) (line firstDiff e) (line firstDiff a))
