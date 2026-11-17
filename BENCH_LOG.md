@@ -157,3 +157,24 @@ promotes it regardless of OSR. Verified Tier1 under default, `TieredPGO=0`,
 `TC_OnStackReplacement=0`, `TC_QuickJitForLoops=0`, `TieredCompilation=0`, and with the
 OSR-defeating loop shape deliberately reintroduced (690 ms vs 532 ms normal on the
 30M-iteration loop, vs ~2100 ms without the re-entry).
+
+## Round 9 — table nodes, byte strings, and a rejected 16-byte Value
+
+**Table hash part as inline nodes (kept).** `Dictionary<Value, HashEntry>` plus linked
+entry objects became an insertion-ordered `Node[]` (key and value inline) with an
+`int[]` bucket index. Small tables went from ~6 allocations to 3. Bucket choice
+matters: Fibonacci hashing scattered sequential integer keys across an 8 MB bucket
+array (sieve 1078 → 1849 ms); an odd bucket count with a multiply-based modulus keeps
+them sequential (sieve → ~500 ms, about 2x faster than before the rewrite). OOP
+606 → ~470 ms, allocation 624 → 360 MB.
+
+**Byte strings (kept).** Strings became `byte[]` with a precomputed hash in the value
+for strings up to 32 bytes. No regressions; OOP improved again (~445 ms) because
+field-name lookups use the stored hash.
+
+**16-byte Value (rejected).** Dropping the tag byte by marking ints/floats/booleans
+with sentinel objects in `Obj` made loops ~2x slower (loop sum 350 → 690 ms, OOP
++35%). Cause: registers are slots in a heap array, so storing a Value whose `Obj` is a
+non-null reference runs a GC write barrier; with `Obj = null` for numbers (24-byte
+layout) the JIT elides it. NaN-boxing would avoid this but needs the reference and 64
+payload bits in separate fields anyway, so 24 bytes stays.
