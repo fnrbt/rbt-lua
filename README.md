@@ -86,7 +86,8 @@ metatables (`__index`, `__newindex`, `__add`/…, `__eq`, `__lt`, `__call`, `__t
 `__len`, `__concat`, …), closures/upvalues, varargs and multiple returns, numeric and
 generic `for`, `while`/`repeat`, method calls, `pcall`/`xpcall`/`error`, coroutines, and a
 standard library: base, `coroutine`, `math`, `string` (including Lua pattern matching:
-`find`/`match`/`gmatch`/`gsub` and `string.format`), `table`, `os`, `io`. (Not yet:
+`find`/`match`/`gmatch`/`gsub` and `string.format`), `table`, `os`, `io`. Calls in
+`return f(...)` position are proper tail calls. (Not yet:
 `goto`/labels, full `_ENV`, `load`, `utf8`, `debug`,
 byte-accurate non-ASCII strings, or local `<const>`/`<close>` attributes. Unsupported
 local attributes are rejected with a syntax error rather than silently ignored.)

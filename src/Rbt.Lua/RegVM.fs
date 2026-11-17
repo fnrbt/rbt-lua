@@ -323,6 +323,15 @@ module RegVM =
 
     and private cReturn (c: Ctx) (exprs: CExpr[]) =
         if exprs.Length = 0 then emit c ROp.Ret0 0 0 0 |> ignore
+        elif exprs.Length = 1 && (match exprs.[0] with CCall _ | CMethod _ -> true | _ -> false) then
+            // Proper tail call: TAILCALL replaces this frame when the callee is
+            // a Lua function; otherwise it acts as a multret CALL and the RET
+            // after it returns the results.
+            let baseR = c.Free
+            compileMultiInto c baseR exprs.[0] 0
+            let last = c.Code.Count - 1
+            c.Code.[last] <- { c.Code.[last] with Op = ROp.TailCall }
+            emit c ROp.Ret baseR 0 0 |> ignore
         elif exprs.Length = 1 && not (isMulti exprs.[0]) then
             let r = exprAny c exprs.[0]
             emit c ROp.Ret1 r 0 0 |> ignore
@@ -936,11 +945,30 @@ module RegVM =
                             if child.Upvals.Length = 0 then emptyCells
                             else child.Upvals |> Array.map (fun u -> match u.Source with FromLocal lr -> cells.[lr.Index] | FromUpval pu -> upvals.[pu.UIndex])
                         regs.[a] <- funcVal (RClosure(child, ups))
-                    | ROp.Call ->
+                    | ROp.Call | ROp.TailCall ->
                         let f = regs.[a]
                         let fAbs = based + a
                         let nargs = if instr.B = 0 then co.Top - (fAbs + 1) else instr.B - 1
                         match f.Obj with
+                        | :? RClosure as callee when instr.Op = ROp.TailCall ->
+                            // Replace the running function: arguments move down to
+                            // this frame's base; the saved caller frame is untouched.
+                            let cp = callee.Proto
+                            Array.Copy(co.Stack, fAbs + 1, co.Stack, based, nargs)
+                            if based + cp.NumReg > co.Stack.Length then co.Grow(based + cp.NumReg)
+                            let ncells : Cell[] = if cp.NumCells > 0 then Array.zeroCreate cp.NumCells else emptyCells
+                            varargs <-
+                                if cp.SimpleParams then
+                                    let st = co.Stack
+                                    for i in nargs .. cp.NumParams - 1 do st.[based + i] <- Value.Nil
+                                    emptyValues
+                                else Vm.SetupParams(co, cp, based, nargs, ncells)
+                            p <- cp; code <- cp.Code; consts <- cp.Consts
+                            upvals <- callee.Upvals
+                            cells <- ncells
+                            ip <- 0
+                            co.Top <- based + cp.NumReg
+                            regs <- co.Stack.AsSpan(based)
                         | :? RClosure as callee ->
                             // Lua → Lua: save the caller, keep looping in the callee.
                             let cp = callee.Proto

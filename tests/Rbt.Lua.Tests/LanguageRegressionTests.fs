@@ -83,3 +83,26 @@ let ``unsupported attributes and malformed numbers report syntax errors`` source
     try lua.Load(source, "@invalid") |> ignore
     with LuaSyntaxError _ -> syntaxError <- true
     Assert.True(syntaxError)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``tail calls run in constant stack space`` asynchronous =
+    let result = run asynchronous """
+        local function count(n, acc) if n == 0 then return acc end return count(n - 1, acc + 1) end
+        local isEven, isOdd
+        function isEven(n) if n == 0 then return true end return isOdd(n - 1) end
+        function isOdd(n) if n == 0 then return false end return isEven(n - 1) end
+        local obj = {n = 0}
+        function obj:spin(k) if k == 0 then return self.n end self.n = self.n + 1 return self:spin(k - 1) end
+        local function va(n, ...) if n == 0 then return select('#', ...) end return va(n - 1, ...) end
+        local function cap(n) local f = function() return n end if n == 0 then return f() end return cap(n - 1) end
+        local co = coroutine.wrap(function() local function y(n) if n == 0 then coroutine.yield('deep') return 'end' end return y(n - 1) end return y(2000000) end)
+        local okp, pv = pcall(function() return count(2000000, 0) end)
+        return count(3000000, 0) == 3000000, isEven(2000001) == false, obj:spin(1000000) == 1000000,
+               va(1000000, 'a', 'b') == 2, cap(1000000) == 0, co() == 'deep' and co() == 'end',
+               okp and pv == 2000000,
+               (function() return tostring(12) end)() == '12',
+               (function() return select(2, 'a', 'b', 'c') end)() == 'b'
+    """
+    for r in result do Assert.True(r.IsTruthy)

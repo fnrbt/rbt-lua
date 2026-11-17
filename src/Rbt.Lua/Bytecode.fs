@@ -23,6 +23,7 @@ type ROp =
     | ForPrep = 47 | ForLoop = 48
     | TForLoop = 49                 // generic-for step after the iterator call: R[A+3] = first result
     | AddI = 50 | SubI = 51         // R[A] = R[B] +/- immediate int C
+    | TailCall = 52                 // `return f(args)`: like Call (C = 0), reusing the frame for Lua callees
 
 [<Struct>]
 type Instr = { Op: ROp; A: int; B: int; C: int }
