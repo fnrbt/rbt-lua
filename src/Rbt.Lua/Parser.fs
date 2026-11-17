@@ -94,7 +94,7 @@ module Parser =
             let mutable go = true
             while go do
                 match peek () with
-                | Dot -> pos <- pos + 1; e <- EIndex(e, EStr(expectName ()))
+                | Dot -> pos <- pos + 1; e <- EIndex(e, EStr(LuaBytes.ofString (expectName ())))
                 | LBracket ->
                     pos <- pos + 1
                     let k = parseExpr 0
@@ -258,13 +258,13 @@ module Parser =
                 pos <- pos + 1
                 let n = expectName ()
                 sb.Append('.').Append(n) |> ignore
-                target <- EIndex(target, EStr n)
+                target <- EIndex(target, EStr (LuaBytes.ofString n))
             let isMethod =
                 if peek () = Colon then
                     pos <- pos + 1
                     let m = expectName ()
                     sb.Append(':').Append(m) |> ignore
-                    target <- EIndex(target, EStr m)
+                    target <- EIndex(target, EStr (LuaBytes.ofString m))
                     true
                 else false
             let body = parseFuncBody (sb.ToString()) isMethod

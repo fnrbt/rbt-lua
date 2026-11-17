@@ -30,7 +30,11 @@ module RegVM =
     let private patchB (c: Ctx) i t = let x = c.Code.[i] in c.Code.[i] <- { x with B = t }
     let private reserve (c: Ctx) = let r = c.Free in c.Free <- c.Free + 1; (if c.Free > c.MaxReg then c.MaxReg <- c.Free); r
     let private konst (c: Ctx) v =
-        let key = struct (v.Tag, BitConverter.DoubleToInt64Bits v.Num, (match v.Obj with :? string as s -> s | _ -> null))
+        // Strings by content (bytes mapped 1:1 to chars), everything else by tag and bits.
+        let key =
+            match v.Obj with
+            | :? (byte[]) as b -> struct (v.Tag, 0L, Text.Encoding.Latin1.GetString b)
+            | _ -> struct (v.Tag, BitConverter.DoubleToInt64Bits v.Num, null)
         match c.ConstMap.TryGetValue key with
         | true, i -> i
         | _ -> let i = c.Consts.Count in c.Consts.Add v; c.ConstMap.[key] <- i; i

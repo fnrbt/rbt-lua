@@ -140,4 +140,4 @@ let ``cancellation interrupts backtracking inside a protected pattern call`` () 
     Assert.ThrowsAny<OperationCanceledException>(fun () ->
         lua.Interp.Call(fn, [||], cts.Token) |> ignore) |> ignore
     let followUp = lua.Interp.Call(compiled lua "return string.match('abc', 'b')", [||], CancellationToken.None)
-    Assert.Equal("b", followUp.[0].Obj :?> string)
+    Assert.Equal("b", followUp.[0].Str)

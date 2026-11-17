@@ -3,6 +3,61 @@ namespace Rbt.Lua
 open System
 open System.Collections.Generic
 open System.Runtime.CompilerServices
+open System.Text
+
+/// Operations on Lua strings, which are immutable byte arrays.
+module LuaBytes =
+    /// Strings up to this length carry a precomputed hash inside their Value.
+    [<Literal>]
+    let HashedMaxLength = 32
+    /// Marks Value.Num bits that hold a precomputed string hash (low 32 bits).
+    [<Literal>]
+    let HashedFlag = 0x100000000L
+
+    let hash (b: byte[]) =
+        let mutable h = HashCode()
+        h.AddBytes(ReadOnlySpan<byte>(b))
+        h.ToHashCode()
+
+    let inline equal (x: byte[]) (y: byte[]) =
+        obj.ReferenceEquals(x, y) || (x.Length = y.Length && ReadOnlySpan<byte>(x).SequenceEqual(ReadOnlySpan<byte>(y)))
+
+    /// Byte-wise ordering (C Lua's strcmp/strcoll in the C locale).
+    let compare (x: byte[]) (y: byte[]) = ReadOnlySpan<byte>(x).SequenceCompareTo(ReadOnlySpan<byte>(y))
+
+    let ofString (s: string) : byte[] = Encoding.UTF8.GetBytes s
+    /// Bytes of ASCII text (number formatting, type names).
+    let ofAscii (s: string) : byte[] = Encoding.ASCII.GetBytes s
+    /// Decode for the host: invalid UTF-8 becomes U+FFFD.
+    let toString (b: byte[]) : string = Encoding.UTF8.GetString b
+
+/// A growable byte buffer for building Lua strings.
+[<Sealed>]
+type ByteBuilder(capacity: int) =
+    let mutable buf : byte[] = Array.zeroCreate (max 16 capacity)
+    let mutable count = 0
+    new() = ByteBuilder(16)
+    member _.Length = count
+    member private _.Ensure(extra: int) =
+        if count + extra > buf.Length then
+            let mutable n = buf.Length * 2
+            while n < count + extra do n <- n * 2
+            Array.Resize(&buf, n)
+    member this.Append(b: byte) =
+        this.Ensure 1
+        buf.[count] <- b
+        count <- count + 1
+    member this.Append(bytes: byte[]) = this.Append(bytes, 0, bytes.Length)
+    member this.Append(bytes: byte[], start: int, length: int) =
+        this.Ensure length
+        Array.blit bytes start buf count length
+        count <- count + length
+    /// Append ASCII text (one byte per char).
+    member this.AppendAscii(s: string) =
+        this.Ensure s.Length
+        for i in 0 .. s.Length - 1 do buf.[count + i] <- byte s.[i]
+        count <- count + s.Length
+    member _.ToArray() = Array.sub buf 0 count
 
 /// Runtime type tag. Order matters: Nil/False are the only falsy values,
 /// so `byte tag > 1uy` is a branch-free truthiness test.
@@ -32,7 +87,22 @@ type Value =
     member inline v.Int = BitConverter.DoubleToInt64Bits v.Num
     /// Read the float payload (only valid when Tag = Float).
     member inline v.Float = v.Num
-    member inline v.Str = v.Obj :?> string
+    /// The raw bytes of a string (only valid when Tag = Str).
+    member inline v.Bytes = v.Obj :?> byte[]
+    /// A string's text, decoded as UTF-8 (invalid sequences become U+FFFD).
+    member v.Str = LuaBytes.toString (v.Obj :?> byte[])
+
+    /// String equality: identity, then length and (when both are known) the
+    /// precomputed hashes, then the bytes.
+    static member StrEq(a: Value, b: Value) =
+        obj.ReferenceEquals(a.Obj, b.Obj) ||
+        (let x = a.Obj :?> byte[]
+         let y = b.Obj :?> byte[]
+         x.Length = y.Length &&
+         (let ha = BitConverter.DoubleToInt64Bits a.Num
+          let hb = BitConverter.DoubleToInt64Bits b.Num
+          (ha &&& hb &&& LuaBytes.HashedFlag) = 0L || ha = hb) &&
+         ReadOnlySpan<byte>(x).SequenceEqual(ReadOnlySpan<byte>(y)))
 
     /// A float represents an integer exactly only inside the signed 64-bit range.
     static member TryExactInt64(f: double) : int64 voption =
@@ -51,7 +121,7 @@ type Value =
             match Value.TryExactInt64 b.Num with ValueSome i -> a.Int = i | ValueNone -> false
         | Tag.Float, Tag.Int ->
             match Value.TryExactInt64 a.Num with ValueSome i -> i = b.Int | ValueNone -> false
-        | Tag.Str, Tag.Str -> String.Equals(a.Obj :?> string, b.Obj :?> string)
+        | Tag.Str, Tag.Str -> Value.StrEq(a, b)
         | _ when byte a.Tag = byte b.Tag -> obj.ReferenceEquals(a.Obj, b.Obj)
         | _ -> false
 
@@ -70,7 +140,9 @@ type Value =
             match Value.TryExactInt64 this.Num with
             | ValueSome i -> i.GetHashCode()
             | ValueNone -> this.Num.GetHashCode()
-        | Tag.Str -> (this.Obj :?> string).GetHashCode()
+        | Tag.Str ->
+            let bits = BitConverter.DoubleToInt64Bits this.Num
+            if bits &&& LuaBytes.HashedFlag <> 0L then int bits else LuaBytes.hash (this.Obj :?> byte[])
         | _ -> RuntimeHelpers.GetHashCode this.Obj
 
     interface IEquatable<Value> with
@@ -87,7 +159,15 @@ module Value =
     let inline ofBool b = if b then True else False
     let inline int (i: int64) = { Tag = Tag.Int; Num = BitConverter.Int64BitsToDouble i; Obj = null }
     let inline float (f: double) = { Tag = Tag.Float; Num = f; Obj = null }
-    let inline str (s: string) = { Tag = Tag.Str; Num = 0.0; Obj = s }
+    /// A Lua string from raw bytes (the array must not be mutated afterwards).
+    let bytes (b: byte[]) =
+        let num =
+            if b.Length <= LuaBytes.HashedMaxLength then
+                BitConverter.Int64BitsToDouble(LuaBytes.HashedFlag ||| int64 (uint32 (LuaBytes.hash b)))
+            else 0.0
+        { Tag = Tag.Str; Num = num; Obj = b }
+    /// A Lua string holding the UTF-8 encoding of host text.
+    let str (s: string) = bytes (LuaBytes.ofString s)
     let inline obj (tag: Tag) (o: obj) = { Tag = tag; Num = 0.0; Obj = o }
 
     /// Lua type name as returned by the `type()` builtin.
@@ -144,7 +224,7 @@ and [<AllowNullLiteral>] LuaTable() =
         (match a.Tag with
          | Tag.Int -> a.Int = b.Int
          | Tag.Float -> a.Num = b.Num
-         | Tag.Str -> obj.ReferenceEquals(a.Obj, b.Obj) || String.Equals(a.Obj :?> string, b.Obj :?> string)
+         | Tag.Str -> Value.StrEq(a, b)
          | _ -> obj.ReferenceEquals(a.Obj, b.Obj))
 
     member inline private _.Bucket(hash: int) =
@@ -313,5 +393,5 @@ and LuaError(value: Value, ?traceback: string) =
     member _.Traceback = defaultArg traceback null
     override _.Message =
         match value.Tag with
-        | Tag.Str -> value.Obj :?> string
+        | Tag.Str -> LuaBytes.toString (value.Obj :?> byte[])
         | _ -> Value.typeName value

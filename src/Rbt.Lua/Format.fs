@@ -136,7 +136,11 @@ module Format =
         | _ -> body
 
     /// `args.[0]` is the format string; conversion arguments start at index 1.
-    let format (interp: Interp) (fmt: string) (args: Value[]) : string =
+    /// Works on Lua string bytes: the format and %s/%q arguments are mapped one
+    /// byte per char (Latin-1), so widths and precisions count bytes as in C.
+    let format (interp: Interp) (fmtBytes: byte[]) (args: Value[]) : byte[] =
+        let latin1 = Text.Encoding.Latin1
+        let fmt = latin1.GetString fmtBytes
         let sb = StringBuilder()
         let mutable ai = 1
         let mutable i = 0
@@ -197,7 +201,7 @@ module Format =
                     let oct = digitsOf v (Convert.ToString(int64 v, 8))
                     let oct = if alt && not (oct.StartsWith "0") then "0" + oct else oct
                     sb.Append(padNum oct false flags width prec) |> ignore
-                | 'c' -> sb.Append(padStr (string (char (int (toInt ())))) flags width) |> ignore
+                | 'c' -> sb.Append(padStr (string (char (int (toInt ()) &&& 0xFF))) flags width) |> ignore
                 | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' -> sb.Append(formatFloat (toFloat ()) conv flags width prec) |> ignore
                 | 'a' | 'A' ->
                     let d = toFloat ()
@@ -205,14 +209,14 @@ module Format =
                     let h = if not (Double.IsNegative d) && flags.Contains "+" then "+" + h elif not (Double.IsNegative d) && flags.Contains " " then " " + h else h
                     sb.Append(padStr h flags width) |> ignore
                 | 's' ->
-                    let s = interp.ToDisplayString(nextArg ())
+                    let s = latin1.GetString (interp.ToLuaString(nextArg ())).Bytes
                     let s = match prec with Some p when p < s.Length -> s.Substring(0, p) | _ -> s
                     sb.Append(padStr s flags width) |> ignore
                 | 'q' ->
                     let v = nextArg ()
                     match v.Tag with
                     | Tag.Str ->
-                        let s = v.Obj :?> string
+                        let s = latin1.GetString v.Bytes
                         sb.Append '"' |> ignore
                         for k in 0 .. s.Length - 1 do
                             let ch = s.[k]
@@ -235,4 +239,4 @@ module Format =
                     | Tag.Nil | Tag.True | Tag.False -> sb.Append(interp.ToDisplayString v) |> ignore
                     | _ -> raise (LuaError(Value.str (sprintf "bad argument #%d to 'format' (value has no literal form)" (ai - 1))))
                 | _ -> raise (LuaError(Value.str (sprintf "invalid conversion '%s' to 'format'" spec)))
-        sb.ToString()
+        latin1.GetBytes(sb.ToString())

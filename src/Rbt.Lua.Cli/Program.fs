@@ -3,11 +3,20 @@ module Rbt.Lua.Cli.Program
 open System
 open Rbt.Lua
 
-let private runSource (src: string) (name: string) =
+/// A Lua state whose print/io.write go to stdout as raw bytes, like C Lua.
+let private newState () =
     let lua = Lua()
+    let stdout = new IO.BufferedStream(Console.OpenStandardOutput())
+    lua.Interp.OutputStream <- stdout
+    lua, stdout
+
+let private runSource (src: string) (name: string) =
+    let lua, stdout = newState ()
     try
-        lua.DoString(src, name) |> ignore
-        0
+        try
+            lua.DoString(src, name) |> ignore
+            0
+        finally stdout.Flush()
     with
     | :? LuaError as e ->
         eprintfn "lua: %s" e.Message
@@ -20,7 +29,7 @@ let private runSource (src: string) (name: string) =
 let main argv =
     match argv with
     | [||] ->
-        let lua = Lua()
+        let lua, stdout = newState ()
         eprintfn "fslua (Lua 5.4). Ctrl-D to exit."
         let mutable go = true
         while go do
@@ -30,6 +39,7 @@ let main argv =
             else
                 try
                     let results = lua.DoString(line, "=stdin")
+                    stdout.Flush()
                     for r in results do Console.Out.WriteLine(lua.Interp.ToDisplayString r)
                 with
                 | :? LuaError as e -> eprintfn "error: %s" e.Message

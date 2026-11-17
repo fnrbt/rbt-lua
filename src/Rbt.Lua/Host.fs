@@ -57,8 +57,15 @@ module Host =
     let str : Reader<string> = fun c ->
         let v = take c
         match v.Tag with
-        | Tag.Str -> v.Obj :?> string
+        | Tag.Str -> v.Str
         | Tag.Int | Tag.Float -> Numbers.toString v
+        | _ -> fail c "string" v
+    /// A string argument's raw bytes (numbers are converted to their string form).
+    let bytes : Reader<byte[]> = fun c ->
+        let v = take c
+        match v.Tag with
+        | Tag.Str -> v.Bytes
+        | Tag.Int | Tag.Float -> Numbers.toBytes v
         | _ -> fail c "string" v
     let truth : Reader<bool> = fun c -> (take c).IsTruthy
     let table : Reader<LuaTable> = fun c -> let v = take c in if v.Tag = Tag.Table then v.Obj :?> LuaTable else fail c "table" v
@@ -88,6 +95,7 @@ module Host =
         member _.Return(i: int) : Reader<Value[]> = fun _ -> [| Value.int (int64 i) |]
         member _.Return(f: float) : Reader<Value[]> = fun _ -> [| Value.float f |]
         member _.Return(s: string) : Reader<Value[]> = fun _ -> [| Value.str s |]
+        member _.Return(b: byte[]) : Reader<Value[]> = fun _ -> [| Value.bytes b |]
         member _.Return(b: bool) : Reader<Value[]> = fun _ -> [| Value.ofBool b |]
         member _.Return(t: LuaTable) : Reader<Value[]> = fun _ -> [| tableVal t |]
         member _.Return(u: unit) : Reader<Value[]> = fun _ -> emptyValues

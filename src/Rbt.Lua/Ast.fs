@@ -22,7 +22,7 @@ type Expr =
     | EFalse
     | EInt of int64
     | EFloat of double
-    | EStr of string
+    | EStr of byte[]
     | EVararg
     | EName of string
     | EIndex of Expr * Expr

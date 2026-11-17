@@ -9,7 +9,7 @@ type Tok =
     | Name of string
     | Int of int64
     | Float of double
-    | Str of string
+    | Str of byte[]
     // keywords
     | KwAnd | KwBreak | KwDo | KwElse | KwElseif | KwEnd | KwFalse | KwFor
     | KwFunction | KwGoto | KwIf | KwIn | KwLocal | KwNil | KwNot | KwOr
@@ -50,6 +50,30 @@ module Lexer =
         let inline cur () = if i < n then src.[i] else '\000'
         let fail msg = raise (LuaSyntaxError(msg, line))
 
+        // String literal contents are built one char per byte (0-255) and
+        // converted with Latin-1 at the end, so escapes can produce any byte.
+        // Source text outside ASCII is written as its UTF-8 encoding.
+        let appendUtf8 (sb: StringBuilder) (cp: int64) =
+            let inline b (x: int64) = sb.Append(char (int x)) |> ignore
+            if cp < 0x80L then b cp
+            elif cp < 0x800L then (b (0xC0L ||| (cp >>> 6)); b (0x80L ||| (cp &&& 0x3FL)))
+            else
+                // Lua 5.4 accepts code points up to 2^31 with the original
+                // (up to six-byte) UTF-8 scheme.
+                let mutable count = 2
+                while cp >= (1L <<< (5 * count + 1)) do count <- count + 1
+                b (((0xFF00L >>> count) &&& 0xFFL) ||| (cp >>> (6 * (count - 1))))
+                for k in count - 2 .. -1 .. 0 do b (0x80L ||| ((cp >>> (6 * k)) &&& 0x3FL))
+        // Append the source character at `i` (and its low surrogate), advancing.
+        let appendSource (sb: StringBuilder) =
+            let c = src.[i]
+            if c < '\128' then (sb.Append c |> ignore; i <- i + 1)
+            elif Char.IsHighSurrogate c && i + 1 < n && Char.IsLowSurrogate src.[i + 1] then
+                appendUtf8 sb (int64 (Char.ConvertToUtf32(c, src.[i + 1])))
+                i <- i + 2
+            else (appendUtf8 sb (int64 c); i <- i + 1)
+        let toBytes (sb: StringBuilder) = Encoding.Latin1.GetBytes(sb.ToString())
+
         // Reads the body of a long bracket `[==[ ... ]==]` at level `lvl`; assumes the
         // opening bracket has been consumed. Used for both long strings and comments.
         let readLongBracket lvl =
@@ -68,12 +92,11 @@ module Lexer =
                     if eq = lvl && j < n && src.[j] = ']' then
                         i <- j + 1
                         finished <- true
-                    else (sb.Append c |> ignore; i <- i + 1)
+                    else appendSource sb
                 else
                     if c = '\n' then line <- line + 1
-                    sb.Append c |> ignore
-                    i <- i + 1
-            sb.ToString()
+                    appendSource sb
+            sb
 
         // If positioned at `[`, `[=`, `[==` ... `[` returns Some level, else None (without consuming).
         let tryLongBracketLevel () =
@@ -130,13 +153,17 @@ module Lexer =
                         i <- i + 1
                         if cur () <> '{' then fail "missing '{' in \\u{xxxx}"
                         i <- i + 1
-                        let mutable v = 0
+                        let mutable v = 0L
+                        let mutable digits = 0
                         while isHex (cur ()) do
-                            v <- v * 16 + Convert.ToInt32(string (cur ()), 16)
+                            v <- v * 16L + int64 (Convert.ToInt32(string (cur ()), 16))
+                            if v > 0x7FFFFFFFL then fail "UTF-8 value too large"
                             i <- i + 1
+                            digits <- digits + 1
+                        if digits = 0 then fail "hexadecimal digit expected"
                         if cur () <> '}' then fail "missing '}' in \\u{xxxx}"
                         i <- i + 1
-                        sb.Append(Char.ConvertFromUtf32 v) |> ignore
+                        appendUtf8 sb v
                     | d when isDigit d ->
                         let mutable v = 0
                         let mutable k = 0
@@ -146,10 +173,8 @@ module Lexer =
                         if v > 255 then fail "decimal escape too large"
                         sb.Append(char v) |> ignore
                     | _ -> fail "invalid escape sequence"
-                else
-                    sb.Append c |> ignore
-                    i <- i + 1
-            sb.ToString()
+                else appendSource sb
+            toBytes sb
 
         let readNumber () =
             let start = i
@@ -238,7 +263,7 @@ module Lexer =
                 let (lvl, after) = (tryLongBracketLevel ()).Value
                 i <- after
                 let s = readLongBracket lvl
-                toks.Add { Tok = Str s; Line = startLine }
+                toks.Add { Tok = Str (toBytes s); Line = startLine }
             | '+' -> add Plus; i <- i + 1
             | '-' -> add Minus; i <- i + 1
             | '*' -> add Star; i <- i + 1

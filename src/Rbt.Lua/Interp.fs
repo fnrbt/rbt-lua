@@ -145,12 +145,21 @@ and [<Sealed>] Interp() =
     member _.Globals = globals
     member _.StringMeta = stringMeta
 
-    /// Where `print` and `io.write` write; null means the current Console.Out.
+    /// Where `print` and `io.write` write text; null means the current Console.Out.
+    /// Lua strings are decoded as UTF-8 (invalid bytes become U+FFFD).
     member val Output : IO.TextWriter = null with get, set
+    /// When set, `print` and `io.write` write raw bytes here instead of Output,
+    /// exactly as C Lua writes to stdout.
+    member val OutputStream : IO.Stream = null with get, set
     /// Where `io.read` reads; null means the current Console.In.
     member val Input : IO.TextReader = null with get, set
     member internal this.Out = match this.Output with null -> Console.Out | w -> w
     member internal this.In = match this.Input with null -> Console.In | r -> r
+    /// Write Lua string bytes to the output (raw stream, else decoded text).
+    member internal this.WriteOut(b: byte[]) =
+        match this.OutputStream with
+        | null -> this.Out.Write(LuaBytes.toString b)
+        | s -> s.Write(b, 0, b.Length)
 
     /// The interpreter's main coroutine (the root sync calls run on).
     member _.Main = main
@@ -288,13 +297,13 @@ and [<Sealed>] Interp() =
     member this.AsNumber(v: Value, what: string) : Value =
         match v.Tag with
         | Tag.Int | Tag.Float -> v
-        | Tag.Str -> match Numbers.parse (v.Obj :?> string) with ValueSome n -> n | ValueNone -> luaError (sprintf "%s must be a number" what)
+        | Tag.Str -> match Numbers.parseBytes (v.Obj :?> byte[]) with ValueSome n -> n | ValueNone -> luaError (sprintf "%s must be a number" what)
         | _ -> luaError (sprintf "%s must be a number" what)
 
     member _.ToNumber(v: Value) : Value voption =
         match v.Tag with
         | Tag.Int | Tag.Float -> ValueSome v
-        | Tag.Str -> Numbers.parse (v.Obj :?> string)
+        | Tag.Str -> Numbers.parseBytes (v.Obj :?> byte[])
         | _ -> ValueNone
 
     member this.ToInteger(v: Value) : int64 voption =
@@ -302,7 +311,7 @@ and [<Sealed>] Interp() =
         | Tag.Int -> ValueSome v.Int
         | Tag.Float -> let f = v.Float in (let i = int64 f in if double i = f then ValueSome i else ValueNone)
         | Tag.Str ->
-            match Numbers.parse (v.Obj :?> string) with
+            match Numbers.parseBytes (v.Obj :?> byte[]) with
             | ValueSome n -> this.ToInteger n
             | ValueNone -> ValueNone
         | _ -> ValueNone
@@ -320,7 +329,7 @@ and [<Sealed>] Interp() =
                 | ValueNone -> this.UnMeta("__unm", v)
         | Len ->
             match v.Tag with
-            | Tag.Str -> Value.int (int64 (v.Obj :?> string).Length)
+            | Tag.Str -> Value.int (int64 (v.Obj :?> byte[]).Length)
             | Tag.Table ->
                 let t = asTable v
                 if isNull t.Metatable then Value.int t.Length
@@ -426,7 +435,13 @@ and [<Sealed>] Interp() =
 
     member this.Concat(a: Value, b: Value) : Value =
         let inline ok (v: Value) = v.Tag = Tag.Str || v.Tag = Tag.Int || v.Tag = Tag.Float
-        if ok a && ok b then Value.str (Numbers.toString a + Numbers.toString b)
+        if ok a && ok b then
+            let x = Numbers.toBytes a
+            let y = Numbers.toBytes b
+            let r = Array.zeroCreate (x.Length + y.Length)
+            Array.blit x 0 r 0 x.Length
+            Array.blit y 0 r x.Length y.Length
+            Value.bytes r
         else
             let h = this.MetaField(a, mConcat)
             let h = if h.IsNil then this.MetaField(b, mConcat) else h
@@ -449,7 +464,7 @@ and [<Sealed>] Interp() =
         | Tag.Int, Tag.Float -> intLessFloat a.Int b.Float
         | Tag.Float, Tag.Int -> not (Double.IsNaN a.Float) && not (intLessEqFloat b.Int a.Float)
         | Tag.Float, Tag.Float -> a.Float < b.Float
-        | Tag.Str, Tag.Str -> String.CompareOrdinal(a.Obj :?> string, b.Obj :?> string) < 0
+        | Tag.Str, Tag.Str -> LuaBytes.compare (a.Obj :?> byte[]) (b.Obj :?> byte[]) < 0
         | _ -> this.CmpMeta(mLt, a, b, "compare")
 
     member this.LessEq(a: Value, b: Value) : bool =
@@ -458,7 +473,7 @@ and [<Sealed>] Interp() =
         | Tag.Int, Tag.Float -> intLessEqFloat a.Int b.Float
         | Tag.Float, Tag.Int -> not (Double.IsNaN a.Float) && not (intLessFloat b.Int a.Float)
         | Tag.Float, Tag.Float -> a.Float <= b.Float
-        | Tag.Str, Tag.Str -> String.CompareOrdinal(a.Obj :?> string, b.Obj :?> string) <= 0
+        | Tag.Str, Tag.Str -> LuaBytes.compare (a.Obj :?> byte[]) (b.Obj :?> byte[]) <= 0
         | _ -> this.CmpMeta(mLe, a, b, "compare")
 
     member this.CmpMeta(name: Value, a: Value, b: Value, _what: string) : bool =
@@ -469,23 +484,29 @@ and [<Sealed>] Interp() =
 
     // ---- display / tostring ----------------------------------------------
 
-    member this.ToDisplayString(v: Value) : string =
+    /// tostring as a Lua string (luaL_tolstring): honors __tostring and __name;
+    /// a string is returned as-is.
+    member this.ToLuaString(v: Value) : Value =
         let h = this.MetaField(v, mTostring)
         if not h.IsNil then
             let r = firstOrNil (this.Call(h, [| v |]))
-            match r.Tag with Tag.Str -> r.Obj :?> string | _ -> luaError "'__tostring' must return a string"
+            if r.Tag = Tag.Str then r else luaError "'__tostring' must return a string"
+        elif v.Tag = Tag.Str then v
         else
-            match v.Tag with
-            | Tag.Nil -> "nil"
-            | Tag.True -> "true"
-            | Tag.False -> "false"
-            | Tag.Int | Tag.Float -> Numbers.toString v
-            | Tag.Str -> v.Obj :?> string
-            | Tag.Table ->
-                let mt = this.GetMeta v
-                let nm = if isNull mt then Value.Nil else mt.Get mName
-                let tn = match nm.Tag with Tag.Str -> nm.Obj :?> string | _ -> "table"
-                sprintf "%s: 0x%08x" tn (RuntimeHelpers.GetHashCode v.Obj)
-            | Tag.Func -> sprintf "function: 0x%08x" (RuntimeHelpers.GetHashCode v.Obj)
-            | Tag.Thread -> sprintf "thread: 0x%08x" (RuntimeHelpers.GetHashCode v.Obj)
-            | _ -> "userdata"
+            Value.str (
+                match v.Tag with
+                | Tag.Nil -> "nil"
+                | Tag.True -> "true"
+                | Tag.False -> "false"
+                | Tag.Int | Tag.Float -> Numbers.toString v
+                | Tag.Table ->
+                    let mt = this.GetMeta v
+                    let nm = if isNull mt then Value.Nil else mt.Get mName
+                    let tn = match nm.Tag with Tag.Str -> nm.Str | _ -> "table"
+                    sprintf "%s: 0x%08x" tn (RuntimeHelpers.GetHashCode v.Obj)
+                | Tag.Func -> sprintf "function: 0x%08x" (RuntimeHelpers.GetHashCode v.Obj)
+                | Tag.Thread -> sprintf "thread: 0x%08x" (RuntimeHelpers.GetHashCode v.Obj)
+                | _ -> "userdata")
+
+    /// tostring decoded as host text (UTF-8; invalid sequences become U+FFFD).
+    member this.ToDisplayString(v: Value) : string = (this.ToLuaString v).Str

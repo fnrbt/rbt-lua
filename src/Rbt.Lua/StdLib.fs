@@ -30,8 +30,16 @@ module StdLib =
     let private checkStr n fn (a: Value[]) =
         let v = arg a (n - 1)
         match v.Tag with
-        | Tag.Str -> v.Obj :?> string
+        | Tag.Str -> v.Str
         | Tag.Int | Tag.Float -> Numbers.toString v
+        | _ -> badArgOf n fn "string" a
+
+    /// A string argument's bytes (numbers are converted, as in Lua).
+    let private checkBytes n fn (a: Value[]) : byte[] =
+        let v = arg a (n - 1)
+        match v.Tag with
+        | Tag.Str -> v.Bytes
+        | Tag.Int | Tag.Float -> Numbers.toBytes v
         | _ -> badArgOf n fn "string" a
 
     let private checkInt n fn (interp: Interp) (a: Value[]) =
@@ -72,15 +80,24 @@ module StdLib =
         // ---- base library -------------------------------------------------
 
         reg "print" (fun a ->
-            let sb = StringBuilder()
+            let sb = ByteBuilder()
             for i in 0 .. a.Length - 1 do
-                if i > 0 then sb.Append '\t' |> ignore
-                sb.Append(interp.ToDisplayString a.[i]) |> ignore
-            interp.Out.Write(sb.Append('\n').ToString())
+                if i > 0 then sb.Append '\t'B
+                sb.Append (interp.ToLuaString a.[i]).Bytes
+            sb.Append '\n'B
+            interp.WriteOut(sb.ToArray())
             emptyValues)
 
-        def "type" (lua { let! v = value in return Value.typeName v })
-        def "tostring" (lua { let! v = value in return interp.ToDisplayString v })
+        let typeNames =
+            [ for t in [ Tag.Nil; Tag.False; Tag.Int; Tag.Str; Tag.Table; Tag.Func; Tag.Thread ] ->
+                let n = Value.typeName { Tag = t; Num = 0.0; Obj = null }
+                n, Value.str n ] |> dict
+        reg "type" (fun a ->
+            checkAny 1 "type" a
+            one typeNames.[Value.typeName (arg a 0)])
+        reg "tostring" (fun a ->
+            checkAny 1 "tostring" a
+            one (interp.ToLuaString(arg a 0)))
 
         reg "tonumber" (fun a ->
             if a.Length >= 2 && not a.[1].IsNil then
@@ -111,7 +128,7 @@ module StdLib =
             let v = arg a 0
             match v.Tag with
             | Tag.Table -> one (Value.int (v.Obj :?> LuaTable).Length)
-            | Tag.Str -> one (Value.int (int64 (v.Obj :?> string).Length))
+            | Tag.Str -> one (Value.int (int64 v.Bytes.Length))
             | _ -> badArgOf 1 "rawlen" "table or string" a)
 
         reg "setmetatable" (fun a ->
@@ -139,7 +156,7 @@ module StdLib =
             let! n = value
             let! more = rest
             return
-                (if n.Tag = Tag.Str && (n.Obj :?> string) = "#" then [| Value.int (int64 more.Length) |]
+                (if n.Tag = Tag.Str && n.Bytes.Length = 1 && n.Bytes.[0] = '#'B then [| Value.int (int64 more.Length) |]
                  else
                      match interp.ToInteger n with
                      | ValueSome i ->
@@ -283,99 +300,105 @@ module StdLib =
             elif i < 0L then max 1 (len + int i + 1)
             else int i
 
-        defIn strlib "len" (lua { let! s = str in return int64 s.Length })
-        defIn strlib "upper" (lua { let! s = str in return s.ToUpperInvariant() })
-        defIn strlib "lower" (lua { let! s = str in return s.ToLowerInvariant() })
-        defIn strlib "reverse" (lua {
-            let! s = str
-            let a = s.ToCharArray()
-            return (Array.Reverse a; String a) })
-        defIn strlib "sub" (lua {
-            let! s = str
-            let! i = opt 1L integer
-            let! j = opt -1L integer
-            let len = s.Length
-            let a0 = max 1 (absIndex len i 1)
-            let b0 = if j < 0L then len + int j + 1 elif j > int64 len then len else int j
-            return (if a0 > b0 then "" else s.Substring(a0 - 1, b0 - a0 + 1)) })
-        defIn strlib "rep" (lua {
-            let! s = str
-            let! n = integer
-            let! sep = opt "" str
-            return
-                (if n <= 0L then ""
-                 else
-                     let sb = StringBuilder()
-                     for k in 1 .. int n do
-                         if k > 1 then sb.Append sep |> ignore
-                         sb.Append s |> ignore
-                     sb.ToString()) })
+        let bstr (b: byte[]) = Value.bytes b
+        let asciiMap (f: byte -> byte) (b: byte[]) = Array.map f b
+        regIn strlib "len" (fun a -> one (Value.int (int64 (checkBytes 1 "string.len" a).Length)))
+        // C-locale case mapping: only ASCII letters change.
+        regIn strlib "upper" (fun a ->
+            one (bstr (asciiMap (fun c -> if c >= 'a'B && c <= 'z'B then c - 32uy else c) (checkBytes 1 "string.upper" a))))
+        regIn strlib "lower" (fun a ->
+            one (bstr (asciiMap (fun c -> if c >= 'A'B && c <= 'Z'B then c + 32uy else c) (checkBytes 1 "string.lower" a))))
+        regIn strlib "reverse" (fun a -> one (bstr (Array.rev (checkBytes 1 "string.reverse" a))))
+        regIn strlib "sub" (fun a ->
+            let s = checkBytes 1 "string.sub" a
+            let i = optInt 2 "string.sub" interp a 1L
+            let j = optInt 3 "string.sub" interp a -1L
+            let len = int64 s.Length
+            let a0 = if i < 0L then max 1L (len + i + 1L) elif i = 0L then 1L else i
+            let b0 = if j < 0L then len + j + 1L elif j > len then len else j
+            if a0 > b0 then one (bstr [||])
+            elif a0 = 1L && b0 = len && (arg a 0).Tag = Tag.Str then one (arg a 0)
+            else one (bstr (Array.sub s (int a0 - 1) (int (b0 - a0 + 1L)))))
+        regIn strlib "rep" (fun a ->
+            let s = checkBytes 1 "string.rep" a
+            let n = checkInt 2 "string.rep" interp a
+            let sep = if (arg a 2).IsNil then [||] else checkBytes 3 "string.rep" a
+            if n <= 0L then one (bstr [||])
+            else
+                let total = int64 s.Length * n + int64 sep.Length * (n - 1L)
+                if total > int64 Int32.MaxValue then err "resulting string too large"
+                let sb = ByteBuilder(int total)
+                for k in 1L .. n do
+                    if k > 1L then sb.Append sep
+                    sb.Append s
+                one (bstr (sb.ToArray())))
         regIn strlib "byte" (fun a ->
-            let s = checkStr 1 "string.byte" a
+            let s = checkBytes 1 "string.byte" a
             let len = s.Length
             let i = let ii = optInt 2 "string.byte" interp a 1L in if ii < 0L then len + int ii + 1 else int ii
             let j = let jj = optInt 3 "string.byte" interp a (int64 i) in if jj < 0L then len + int jj + 1 else int jj
             let i = max 1 i
             let j = min len j
             if i > j then emptyValues
-            else Array.init (j - i + 1) (fun k -> Value.int (int64 (int s.[i - 1 + k]))))
+            else Array.init (j - i + 1) (fun k -> Value.int (int64 s.[i - 1 + k])))
         regIn strlib "char" (fun a ->
-            let sb = StringBuilder()
-            for i in 0 .. a.Length - 1 do sb.Append(char (int (checkInt (i + 1) "string.char" interp a))) |> ignore
-            one (Value.str (sb.ToString())))
+            one (bstr (Array.init a.Length (fun i ->
+                let c = checkInt (i + 1) "string.char" interp a
+                if c < 0L || c > 255L then err (sprintf "bad argument #%d to 'string.char' (value out of range)" (i + 1))
+                byte c))))
 
-        regIn strlib "format" (fun a -> one (Value.str (Format.format interp (checkStr 1 "format" a) a)))
+        regIn strlib "format" (fun a -> one (bstr (Format.format interp (checkBytes 1 "string.format" a) a)))
 
         regIn strlib "find" (fun a ->
-            let s = checkStr 1 "string.find" a
-            let pat = checkStr 2 "string.find" a
+            let s = checkBytes 1 "string.find" a
+            let pat = checkBytes 2 "string.find" a
             let init = int (optInt 3 "string.find" interp a 1L)
             let plain = (arg a 3).IsTruthy
             LuaPattern.find interp.Tick s pat init plain)
         regIn strlib "match" (fun a ->
-            let s = checkStr 1 "string.match" a
-            let pat = checkStr 2 "string.match" a
+            let s = checkBytes 1 "string.match" a
+            let pat = checkBytes 2 "string.match" a
             let init = int (optInt 3 "string.match" interp a 1L)
             LuaPattern.matchOne interp.Tick s pat init)
         regIn strlib "gmatch" (fun a ->
-            let s = checkStr 1 "string.gmatch" a
-            let pat = checkStr 2 "string.gmatch" a
+            let s = checkBytes 1 "string.gmatch" a
+            let pat = checkBytes 2 "string.gmatch" a
             let it = LuaPattern.gmatch interp.Tick s pat
             one (func "gmatch.iterator" (fun _ -> it ())))
         regIn strlib "gsub" (fun a ->
-            let s = checkStr 1 "string.gsub" a
-            let pat = checkStr 2 "string.gsub" a
+            let s = checkBytes 1 "string.gsub" a
+            let pat = checkBytes 2 "string.gsub" a
             let repl = arg a 2
             let maxN = if (arg a 3).IsNil then Int32.MaxValue else int (checkInt 4 "string.gsub" interp a)
-            let apply (caps: Value[]) (mStart: int) (mEnd: int) : string voption =
-                let whole = s.Substring(mStart, mEnd - mStart)
+            let replacement (v: Value) =
+                match v.Tag with
+                | Tag.Str | Tag.Int | Tag.Float -> ValueSome(Numbers.toBytes v)
+                | _ when not v.IsTruthy -> ValueNone   // false/nil keep the original match
+                | _ -> err (sprintf "invalid replacement value (a %s)" (Value.typeName v))
+            let apply (caps: Value[]) (mStart: int) (mEnd: int) : byte[] voption =
                 match repl.Tag with
                 | Tag.Str | Tag.Int | Tag.Float ->
-                    let r = Numbers.toString repl
-                    let sb = StringBuilder()
+                    let r = Numbers.toBytes repl
+                    let sb = ByteBuilder(r.Length)
                     let mutable i = 0
                     while i < r.Length do
-                        if r.[i] = '%' && i + 1 < r.Length then
-                            let d = r.[i + 1]
-                            if d = '%' then sb.Append '%' |> ignore
-                            elif d >= '0' && d <= '9' then
-                                let idx = int d - int '0'
-                                if idx = 0 then sb.Append whole |> ignore
-                                elif idx - 1 < caps.Length then sb.Append(Numbers.toString caps.[idx - 1]) |> ignore
-                                else err "invalid capture index in replacement string"
-                            else (sb.Append d |> ignore)
+                        if r.[i] = '%'B then
+                            let d = if i + 1 < r.Length then r.[i + 1] else 0uy
+                            if d = '%'B then sb.Append '%'B
+                            elif d >= '0'B && d <= '9'B then
+                                let idx = int d - int '0'B
+                                if idx = 0 then sb.Append(s, mStart, mEnd - mStart)
+                                elif idx - 1 < caps.Length then sb.Append(Numbers.toBytes caps.[idx - 1])
+                                else err (sprintf "invalid capture index %%%d in replacement string" idx)
+                            else err "invalid use of '%' in replacement string"
                             i <- i + 2
-                        else (sb.Append r.[i] |> ignore; i <- i + 1)
-                    ValueSome(sb.ToString())
-                | Tag.Table ->
-                    let v = interp.Index(repl, caps.[0])
-                    if v.IsTruthy then ValueSome(Numbers.toString v) else ValueNone
-                | Tag.Func ->
-                    let v = (interp.Call(repl, caps)) |> firstOrNil
-                    if v.IsTruthy then ValueSome(Numbers.toString v) else ValueNone
+                        else (sb.Append r.[i]; i <- i + 1)
+                    ValueSome(sb.ToArray())
+                | Tag.Table -> replacement (interp.Index(repl, caps.[0]))
+                | Tag.Func -> replacement ((interp.Call(repl, caps)) |> firstOrNil)
                 | _ -> badArgOf 3 "string.gsub" "string/function/table" a
             let result, count = LuaPattern.gsub interp.Tick s pat maxN apply
-            [| Value.str result; Value.int (int64 count) |])
+            [| bstr result; Value.int (int64 count) |])
 
         // ---- table --------------------------------------------------------
 
@@ -408,19 +431,20 @@ module StdLib =
             one removed)
         regIn tablib "concat" (fun a ->
             let t = checkTable 1 "table.concat" a
-            let sep = if (arg a 1).IsNil then "" else checkStr 2 "table.concat" a
+            let sep = if (arg a 1).IsNil then [||] else checkBytes 2 "table.concat" a
             let i = optInt 3 "table.concat" interp a 1L
             let j = optInt 4 "table.concat" interp a t.Length
-            let sb = StringBuilder()
+            let sb = ByteBuilder()
             let mutable k = i
             while k <= j do
                 let v = t.Get(Value.int k)
                 match v.Tag with
-                | Tag.Str | Tag.Int | Tag.Float -> sb.Append(Numbers.toString v) |> ignore
+                | Tag.Str -> sb.Append v.Bytes
+                | Tag.Int | Tag.Float -> sb.Append(Numbers.toBytes v)
                 | _ -> err (sprintf "invalid value (%s) at index %d in table for 'concat'" (Value.typeName v) k)
-                if k < j then sb.Append sep |> ignore
+                if k < j then sb.Append sep
                 k <- k + 1L
-            one (Value.str (sb.ToString())))
+            one (Value.bytes (sb.ToArray())))
         regIn tablib "move" (fun a ->
             let a1 = arg a 0
             if a1.Tag <> Tag.Table then badArg 1 "table.move" "table" a1 |> ignore
@@ -495,12 +519,17 @@ module StdLib =
 
         let iolib = newLib "io"
         regIn iolib "write" (fun a ->
-            let w = interp.Out
-            for v in a do
+            for i in 0 .. a.Length - 1 do
+                let v = a.[i]
                 // Numbers are written with C's %d / %.14g, not tostring.
-                w.Write(if v.Tag = Tag.Float then Numbers.floatG14 v.Float else Numbers.toString v)
+                match v.Tag with
+                | Tag.Str -> interp.WriteOut v.Bytes
+                | Tag.Int -> interp.WriteOut(LuaBytes.ofAscii (string v.Int))
+                | Tag.Float -> interp.WriteOut(LuaBytes.ofAscii (Numbers.floatG14 v.Float))
+                | _ -> badArg (i + 1) "io.write" "string" v |> ignore
             emptyValues)
         regIn iolib "read" (fun _ ->
+            match interp.OutputStream with null -> () | o -> o.Flush()
             let line = interp.In.ReadLine()
             one (if isNull line then Value.Nil else Value.str line))
 

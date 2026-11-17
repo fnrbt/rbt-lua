@@ -25,8 +25,14 @@ module Numbers =
         match v.Tag with
         | Tag.Int -> string v.Int
         | Tag.Float -> floatToString v.Float
-        | Tag.Str -> v.Obj :?> string
+        | Tag.Str -> LuaBytes.toString (v.Obj :?> byte[])
         | _ -> ""
+
+    /// A number's string form as Lua string bytes (always ASCII).
+    let toBytes (v: Value) : byte[] =
+        match v.Tag with
+        | Tag.Str -> v.Obj :?> byte[]
+        | _ -> Text.Encoding.ASCII.GetBytes(toString v)
 
     let inline private isHexDigit c =
         (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
@@ -80,9 +86,13 @@ module Numbers =
 
     /// Parse a string as a Lua number, honoring optional sign, hex integers and
     /// decimal int/float. Returns ValueNone if it is not a valid numeral.
+    // C isspace in the C locale.
+    let private luaSpace = [| ' '; '\t'; '\n'; '\011'; '\012'; '\r' |]
+
     let parse (str: string) : Value voption =
-        let s = str.Trim()
-        if s.Length = 0 then ValueNone
+        let s = str.Trim(luaSpace)
+        // .NET parsing ignores trailing NULs; a Lua numeral cannot contain one.
+        if s.Length = 0 || s.Contains '\000' then ValueNone
         else
             let sign, body =
                 if s.[0] = '-' then -1L, s.Substring 1
@@ -102,6 +112,12 @@ module Numbers =
                 match Int64.TryParse(s, NumberStyles.AllowLeadingSign, inv) with
                 | true, i -> ValueSome(Value.int i)
                 | _ ->
-                    match Double.TryParse(s, NumberStyles.Float, inv) with
+                    // .NET would also accept "Infinity" and "NaN"; Lua numerals are digits only.
+                    let numeral = s |> Seq.forall (fun c -> Char.IsAsciiDigit c || c = '.' || c = 'e' || c = 'E' || c = '+' || c = '-')
+                    match (if numeral then Double.TryParse(s, NumberStyles.Float, inv) else (false, 0.0)) with
                     | true, d -> ValueSome(Value.float d)
                     | _ -> ValueNone
+
+    /// Parse a Lua string's bytes as a number (bytes map 1:1 to chars, so any
+    /// non-ASCII byte makes the numeral invalid).
+    let parseBytes (b: byte[]) : Value voption = parse (Text.Encoding.Latin1.GetString b)

@@ -149,7 +149,7 @@ module Compiler =
         | EFalse -> CConst Value.False
         | EInt v -> CConst(Value.int v)
         | EFloat v -> CConst(Value.float v)
-        | EStr s -> CConst(Value.str s)
+        | EStr s -> CConst(Value.bytes s)
         | EVararg -> CVararg
         | EName n -> resolveName ctx n
         | EIndex(o, k) -> CIndex(cExpr ctx o, cExpr ctx k)
