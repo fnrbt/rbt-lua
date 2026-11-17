@@ -116,44 +116,6 @@ module StdLib =
                 let m = arg a 1
                 if m.IsNil then err "assertion failed!" else raise (LuaError m))
 
-        reg "error" (fun a ->
-            let v = arg a 0
-            raise (LuaError v))
-
-        reg "pcall" (fun a ->
-            if a.Length = 0 then err "bad argument #1 to 'pcall' (value expected)"
-            try
-                let res = interp.Call(a.[0], a.[1..])
-                let r = Array.zeroCreate (res.Length + 1)
-                r.[0] <- Value.True
-                Array.blit res 0 r 1 res.Length
-                r
-            with
-            | :? LuaError as e -> [| Value.False; e.Value |]
-            | :? OperationCanceledException -> reraise()
-            | e -> [| Value.False; Value.str e.Message |])
-
-        reg "xpcall" (fun a ->
-            let f = arg a 0
-            let handler = arg a 1
-            let handleError error =
-                try
-                    let handled = interp.Call(handler, [| error |])
-                    [| Value.False; if handled.Length > 0 then handled.[0] else Value.Nil |]
-                with
-                | :? OperationCanceledException -> reraise()
-                | _ -> [| Value.False; Value.str "error in error handling" |]
-            try
-                let res = interp.Call(f, (if a.Length > 2 then a.[2..] else emptyValues))
-                let r = Array.zeroCreate (res.Length + 1)
-                r.[0] <- Value.True
-                Array.blit res 0 r 1 res.Length
-                r
-            with
-            | :? OperationCanceledException -> reraise()
-            | :? LuaError as e -> handleError e.Value
-            | e -> handleError (Value.str e.Message))
-
         def "select" (lua {
             let! n = value
             let! more = rest
@@ -320,16 +282,16 @@ module StdLib =
             let pat = checkStr 2 "find" a
             let init = int (optInt 3 "find" interp a 1L)
             let plain = (arg a 3).IsTruthy
-            LuaPattern.find interp.Dispatch s pat init plain)
+            LuaPattern.find interp.Tick s pat init plain)
         regIn strlib "match" (fun a ->
             let s = checkStr 1 "match" a
             let pat = checkStr 2 "match" a
             let init = int (optInt 3 "match" interp a 1L)
-            LuaPattern.matchOne interp.Dispatch s pat init)
+            LuaPattern.matchOne interp.Tick s pat init)
         regIn strlib "gmatch" (fun a ->
             let s = checkStr 1 "gmatch" a
             let pat = checkStr 2 "gmatch" a
-            let it = LuaPattern.gmatch interp.Dispatch s pat
+            let it = LuaPattern.gmatch interp.Tick s pat
             one (func "gmatch.iterator" (fun _ -> it ())))
         regIn strlib "gsub" (fun a ->
             let s = checkStr 1 "gsub" a
@@ -363,7 +325,7 @@ module StdLib =
                     let v = (interp.Call(repl, caps)) |> firstOrNil
                     if v.IsTruthy then ValueSome(Numbers.toString v) else ValueNone
                 | _ -> err "bad argument #3 to 'gsub' (string/function/table expected)"
-            let result, count = LuaPattern.gsub interp.Dispatch s pat maxN apply
+            let result, count = LuaPattern.gsub interp.Tick s pat maxN apply
             [| Value.str result; Value.int (int64 count) |])
 
         // ---- table --------------------------------------------------------
@@ -432,7 +394,10 @@ module StdLib =
                     if (firstOrNil (interp.Call(cmp, [| x; y |]))).IsTruthy then -1
                     elif (firstOrNil (interp.Call(cmp, [| y; x |]))).IsTruthy then 1
                     else 0)
-            Array.Sort(items, comparison)
+            // Array.Sort wraps comparer exceptions; surface the Lua error itself.
+            try Array.Sort(items, comparison)
+            with :? InvalidOperationException as e when not (isNull e.InnerException) ->
+                Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw()
             for k in 0 .. n - 1 do t.Set(Value.int (int64 k + 1L), items.[k])
             emptyValues)
         // table.unpack is also available as global unpack (5.1 compat)
@@ -465,5 +430,7 @@ module StdLib =
 
         G.Set(Value.str "_G", tableVal G)
         G.Set(Value.str "_VERSION", Value.str "Lua 5.4")
+        // pcall, xpcall, error and the coroutine library are VM intrinsics.
+        RegVM.install interp
         ()
 

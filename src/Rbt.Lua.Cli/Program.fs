@@ -3,13 +3,10 @@ module Rbt.Lua.Cli.Program
 open System
 open Rbt.Lua
 
-let private runSource (src: string) (name: string) (backend: string) =
+let private runSource (src: string) (name: string) =
     let lua = Lua()
     try
-        (match backend with
-         | "stack" -> lua.DoStringStack(src, name)
-         | "reg" -> lua.DoStringReg(src, name)
-         | _ -> lua.DoString(src, name)) |> ignore
+        lua.DoString(src, name) |> ignore
         0
     with
     | :? LuaError as e ->
@@ -24,7 +21,7 @@ let main argv =
     match argv with
     | [||] ->
         let lua = Lua()
-        eprintfn "fslua (tree-walker). Ctrl-D to exit."
+        eprintfn "fslua (Lua 5.4). Ctrl-D to exit."
         let mutable go = true
         while go do
             Console.Out.Write "> "
@@ -38,11 +35,8 @@ let main argv =
                 | :? LuaError as e -> eprintfn "error: %s" e.Message
                 | LuaSyntaxError(msg, l) -> eprintfn "syntax error: line %d: %s" l msg
         0
-    | [| "-e"; code |] -> runSource code "=(command line)" "tree"
-    | [| "--stack"; path |] -> runSource (IO.File.ReadAllText path) path "stack"
-    | [| "--reg"; path |] -> runSource (IO.File.ReadAllText path) path "reg"
-    | [| "--tree"; path |] -> runSource (IO.File.ReadAllText path) path "tree"
-    | [| path |] -> runSource (IO.File.ReadAllText path) path "tree"
+    | [| "-e"; code |] -> runSource code "=(command line)"
+    | [| path |] -> runSource (IO.File.ReadAllText path) path
     | _ ->
-        eprintfn "usage: fslua [--tree|--stack|--reg] script.lua  |  -e \"code\""
+        eprintfn "usage: fslua script.lua  |  -e \"code\""
         1

@@ -15,6 +15,7 @@ type Tag =
     | Str = 5uy
     | Table = 6uy
     | Func = 7uy
+    | Thread = 8uy
 
 /// A Lua value. A 24-byte struct: numbers and booleans live inline in `Num`
 /// (integers are bit-reinterpreted into the double), reference types in `Obj`.
@@ -98,6 +99,7 @@ module Value =
         | Tag.Str -> "string"
         | Tag.Table -> "table"
         | Tag.Func -> "function"
+        | Tag.Thread -> "thread"
         | _ -> "userdata"
 
 // ---------------------------------------------------------------------------

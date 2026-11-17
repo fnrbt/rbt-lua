@@ -22,7 +22,11 @@ let benches : (string * string) list =
       "sieve 2M",
       "local n=2000000 local s={} local c=0 for i=2,n do s[i]=true end for i=2,n do if s[i] then c=c+1 local j=i*i while j<=n do s[j]=false j=j+i end end end return c"
       "OOP vectors 1M",
-      "local V={} V.__index=V function V.new(x,y) return setmetatable({x=x,y=y},V) end function V:add(o) return V.new(self.x+o.x,self.y+o.y) end local a=V.new(1,2) local b=V.new(3,4) local s=0 for i=1,1000000 do local c=a:add(b) s=s+c.x end return s" ]
+      "local V={} V.__index=V function V.new(x,y) return setmetatable({x=x,y=y},V) end function V:add(o) return V.new(self.x+o.x,self.y+o.y) end local a=V.new(1,2) local b=V.new(3,4) local s=0 for i=1,1000000 do local c=a:add(b) s=s+c.x end return s"
+      "coroutine gen 1M",
+      "local gen=coroutine.wrap(function() for i=1,1000000 do coroutine.yield(i) end end) local s=0 for i=1,1000000 do s=s+gen() end return s"
+      "pcall+error 300k",
+      "local function f(i) if i%2==0 then error('e') end return i end local n=0 for i=1,300000 do if pcall(f,i) then n=n+1 end end return n" ]
 
 let private fmt (s: string) = if s.Length > 14 then s.Substring(0, 11) + "..." else s
 let private inv = Globalization.CultureInfo.InvariantCulture
@@ -38,13 +42,9 @@ let private measure reps (f: unit -> string) : float * string =
         best <- min best sw.Elapsed.TotalMilliseconds
     best, result
 
-let private runRbtLua backend code () : string =
+let private runRbtLua code () : string =
     let lua = Lua()
-    let r =
-        match backend with
-        | "stack" -> lua.DoStringStack(code, "=bench")
-        | "reg" -> lua.DoStringReg(code, "=bench")
-        | _ -> lua.DoString(code, "=bench")
+    let r = lua.DoString(code, "=bench")
     if r.Length > 0 then lua.Interp.ToDisplayString r.[0] else "nil"
 
 let private runMoon code () : string =
@@ -89,20 +89,21 @@ let main argv =
     let withClua = cluaAvailable.Value && not (flags.Contains "noclua")
     let withAlloc = flags.Contains "alloc"
     let engines =
-        [ yield "tree"; yield "stack"; yield "reg"
+        [ yield "rbt"
           if withClua then yield "clua"
           if withMoon then yield "moon" ]
     let timeEngine code en : float * string =
         match en with
         | "clua" -> runClua reps code
         | "moon" -> measure reps (runMoon code)
-        | "stack" | "reg" | "tree" -> measure reps (runRbtLua en code)
+        | "rbt" -> measure reps (runRbtLua code)
         | _ -> nan, ""
-    printfn "Rbt.Lua backends vs C Lua 5.4 (and MoonSharp) — best of %d, ms (lower=faster)\n" reps
+    printfn "Rbt.Lua vs C Lua 5.4 (and MoonSharp) — best of %d, ms (lower=faster)\n" reps
     let col = 10
     printf "%-22s" "benchmark"
     for e in engines do printf " %*s" col e
-    printfn "  %12s" (if withClua then "reg vs clua" else "reg vs moon")
+    let baseName = if withClua then Some "clua" elif withMoon then Some "moon" else None
+    printfn "  %12s" (match baseName with Some b -> "rbt vs " + b | None -> "")
     printfn "%s" (String('-', 22 + (col + 1) * engines.Length + 14))
     let totals = System.Collections.Generic.Dictionary<string, float>()
     for (name, code) in benches do
@@ -111,18 +112,19 @@ let main argv =
         for (e, (m, _)) in results do totals.[e] <- (if totals.ContainsKey e then totals.[e] else 0.0) + (if Double.IsNaN m then 0.0 else m)
         let allRes = results |> List.map (fun (_, (_, r)) -> r) |> List.distinct
         let agree = if List.length allRes <= 1 then "" else "  [DISAGREE: " + String.Join(" ", allRes |> List.map fmt) + "]"
-        let baseline = if withClua then ms "clua" else ms "moon"
+        let ratio = match baseName with Some b -> sprintf "%11.2fx" (ms b / ms "rbt") | None -> ""
         printf "%-22s" name
         for (_, (m, _)) in results do printf " %*.1f" col m
-        printfn "  %11.2fx%s" (baseline / ms "reg") agree
+        printfn "  %s%s" ratio agree
     printfn "%s" (String('-', 22 + (col + 1) * engines.Length + 14))
     printf "%-22s" "TOTAL"
     for e in engines do printf " %*.1f" col (if totals.ContainsKey e then totals.[e] else nan)
-    let basel = if withClua then totals.["clua"] else totals.["moon"]
-    printfn "  %11.2fx" (basel / totals.["reg"])
+    match baseName with
+    | Some b -> printfn "  %11.2fx" (totals.[b] / totals.["rbt"])
+    | None -> printfn ""
     if withAlloc then
         printfn "\nAllocation per run (MB), in-process engines:"
-        printf "%-22s %10s %10s %10s %10s\n" "benchmark" "tree" "stack" "reg" "moon"
+        printf "%-22s %10s %10s\n" "benchmark" "rbt" "moon"
         for (name, code) in benches do
             let alloc run =
                 try
@@ -131,7 +133,6 @@ let main argv =
                     run () |> ignore
                     float (GC.GetTotalAllocatedBytes true - b) / 1e6
                 with _ -> nan
-            printfn "%-22s %10.1f %10.1f %10.1f %10.1f" name
-                (alloc (runRbtLua "tree" code)) (alloc (runRbtLua "stack" code))
-                (alloc (runRbtLua "reg" code)) (if withMoon then alloc (runMoon code) else nan)
+            printfn "%-22s %10.1f %10.1f" name
+                (alloc (runRbtLua code)) (if withMoon then alloc (runMoon code) else nan)
     0

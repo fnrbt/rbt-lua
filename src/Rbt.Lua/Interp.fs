@@ -6,28 +6,6 @@ open System.Runtime.CompilerServices
 open System.Threading
 open System.Threading.Tasks
 
-/// A boxed local — a Lua upvalue. Multiple closures sharing a captured local
-/// share one Cell, so mutations are visible across them.
-[<Sealed>]
-type Cell(v: Value) =
-    member val Value = v with get, set
-
-/// An activation record. One array allocation for the plain locals; cells are
-/// created lazily only where a local is actually captured.
-[<Sealed>]
-type Frame(slots: Value[], cells: Cell[], upvals: Cell[], varargs: Value[]) =
-    member _.Slots = slots
-    member _.Cells = cells
-    member _.Upvals = upvals
-    member _.Varargs = varargs
-
-/// Non-local control flow result of executing a statement/block.
-[<Struct>]
-type Flow =
-    | Normal
-    | Break
-    | Return of values: Value[]
-
 [<AutoOpen>]
 module Runtime =
     let emptyValues : Value[] = [||]
@@ -103,8 +81,8 @@ module Runtime =
         elif b >= 0L then a <<< int b
         else int64 (uint64 a >>> int -b)
 
-/// Anything callable as a Lua function. Every backend's closure type implements
-/// this, so `Interp.Call` dispatches uniformly across tree-walker / stack / register.
+/// Anything callable as a Lua function: register-VM closures, VM intrinsics and
+/// host functions all implement this, so `Interp.Call` dispatches uniformly.
 type ICallable =
     abstract member Invoke : Interp * Value[] -> Value[]
 
@@ -113,15 +91,6 @@ type ICallable =
 /// that expose IAsyncCallable should be invoked through Interp.CallAsync.
 and IAsyncCallable =
     abstract member InvokeAsync : Interp * Value[] * CancellationToken -> Task<Value[]>
-
-/// An interpreted function (tree-walking backend): a prototype plus captured cells.
-and [<Sealed>] Closure(proto: CProto, upvals: Cell[]) =
-    member _.Proto = proto
-    member _.Upvals = upvals
-    interface ICallable with
-        member this.Invoke(interp, args) = interp.CallClosure(this, args)
-    interface IAsyncCallable with
-        member this.InvokeAsync(interp, args, ct) = interp.CallClosureAsync(this, args, ct)
 
 /// A host (built-in) function.
 and [<Sealed>] Builtin(name: string, fn: Value[] -> Value[]) =
@@ -149,23 +118,45 @@ and [<Sealed>] Interp() =
     let stringMeta = LuaTable()   // metatable shared by all strings; __index = string library
     // The async entry point supplies the token for synchronous nested calls
     // (metamethods, pcall, iterator functions) as well as async Lua frames.
-    // A single cheap counter covers VM statements and empty loop iterations;
-    // only every 1024th dispatch reads the ambient token.
+    // A single cheap counter covers every VM instruction; only every 1024th
+    // dispatch reads the ambient token.
     let cancellation = AsyncLocal<CancellationToken>()
     let mutable dispatches = 0
+    // Register-VM state: the main (root) coroutine and whichever coroutine is
+    // currently executing. Nested native re-entries into the VM are bounded so
+    // runaway metamethod/host recursion fails as a Lua error, not a host crash.
+    let main = Coroutine(1024, 64, true)
+    let mutable current = main
+    let mutable nativeCalls = 0
 
-    member internal _.Dispatch() =
+    /// Count one VM instruction; checks cancellation every 1024. Returns true
+    /// every 2^16 instructions, when the VM loop should return and re-enter
+    /// itself so the JIT can tier it up by call count (see RegVM.Vm.Loop).
+    member internal _.Dispatch() : bool =
         dispatches <- dispatches + 1
         if dispatches &&& 1023 = 0 then
             cancellation.Value.ThrowIfCancellationRequested()
+            dispatches &&& 0xFFFF = 0
+        else false
 
-    member internal _.Dispatch(ct: CancellationToken) =
-        dispatches <- dispatches + 1
-        if dispatches &&& 1023 = 0 then
-            ct.ThrowIfCancellationRequested()
+    /// Count work done by library code (cancellation only).
+    member internal this.Tick() = this.Dispatch() |> ignore
 
     member _.Globals = globals
     member _.StringMeta = stringMeta
+
+    /// The interpreter's main coroutine (the root sync calls run on).
+    member _.Main = main
+    /// The coroutine currently executing register-VM code.
+    member _.Current with get () = current and set (c: Coroutine) = current <- c
+    /// The ambient cancellation token for the current invocation.
+    member _.CancellationToken = cancellation.Value
+
+    /// Enter a native (host-stack) re-entry into the VM; balanced by LeaveNative.
+    member internal _.EnterNative() =
+        if nativeCalls >= 200 then raise (LuaError(Value.str "C stack overflow"))
+        nativeCalls <- nativeCalls + 1
+    member internal _.LeaveNative() = nativeCalls <- nativeCalls - 1
 
     // ---- metatables -------------------------------------------------------
 
@@ -283,649 +274,6 @@ and [<Sealed>] Interp() =
             if changed then cancellation.Value <- previous
     }
 
-    member this.CallClosure(c: Closure, args: Value[]) : Value[] =
-        let p = c.Proto
-        let slots = if p.NumSlots > 0 then Array.zeroCreate p.NumSlots else emptyValues
-        let cells : Cell[] = if p.NumCells > 0 then Array.zeroCreate p.NumCells else emptyCells
-        let np = p.NumParams
-        for i in 0 .. np - 1 do
-            let v = if i < args.Length then args.[i] else Value.Nil
-            if p.ParamCells.[i] then cells.[p.ParamIndex.[i]] <- Cell v
-            else slots.[p.ParamIndex.[i]] <- v
-        let varargs =
-            if p.IsVararg && args.Length > np then args.[np..] else emptyValues
-        let frame = Frame(slots, cells, c.Upvals, varargs)
-        match this.ExecBlock(frame, p.Body) with
-        | Return vs -> vs
-        | _ -> emptyValues
-
-    member this.CallClosureAsync(c: Closure, args: Value[], ct: CancellationToken) : Task<Value[]> = task {
-        let previous = cancellation.Value
-        let changed = ct <> previous
-        let effective = if changed then ct else previous
-        if changed then cancellation.Value <- ct
-        try
-            effective.ThrowIfCancellationRequested()
-            let p = c.Proto
-            let slots = if p.NumSlots > 0 then Array.zeroCreate p.NumSlots else emptyValues
-            let cells : Cell[] = if p.NumCells > 0 then Array.zeroCreate p.NumCells else emptyCells
-            let np = p.NumParams
-            for i in 0 .. np - 1 do
-                let v = if i < args.Length then args.[i] else Value.Nil
-                if p.ParamCells.[i] then cells.[p.ParamIndex.[i]] <- Cell v
-                else slots.[p.ParamIndex.[i]] <- v
-            let varargs =
-                if p.IsVararg && args.Length > np then args.[np..] else emptyValues
-            let frame = Frame(slots, cells, c.Upvals, varargs)
-            match! this.ExecBlockAsync(frame, p.Body, effective) with
-            | Return vs -> return vs
-            | _ -> return emptyValues
-        finally
-            if changed then cancellation.Value <- previous
-    }
-
-    member this.MakeClosure(frame: Frame, proto: CProto) : Value =
-        let ups =
-            if proto.Upvals.Length = 0 then emptyCells
-            else
-                proto.Upvals
-                |> Array.map (fun u ->
-                    match u.Source with
-                    | FromLocal lr -> frame.Cells.[lr.Index]
-                    | FromUpval pu -> frame.Upvals.[pu.UIndex])
-        funcVal (Closure(proto, ups))
-
-    // ---- expression evaluation -------------------------------------------
-
-    member this.EvalExpr(frame: Frame, e: CExpr) : Value =
-        match e with
-        | CConst v -> v
-        | CLocal lr -> if lr.IsCell then frame.Cells.[lr.Index].Value else frame.Slots.[lr.Index]
-        | CUpval u -> frame.Upvals.[u.UIndex].Value
-        | CGlobal n -> globals.Get(Value.str n)
-        | CVararg -> if frame.Varargs.Length > 0 then frame.Varargs.[0] else Value.Nil
-        | CParen x -> this.EvalExpr(frame, x)
-        | CIndex(o, k) -> this.Index(this.EvalExpr(frame, o), this.EvalExpr(frame, k))
-        | CUnary(op, x) -> this.Unary(op, this.EvalExpr(frame, x))
-        | CBinary(op, a, b) -> this.BinOp(op, this.EvalExpr(frame, a), this.EvalExpr(frame, b))
-        | CAnd(a, b) -> let av = this.EvalExpr(frame, a) in if av.IsTruthy then this.EvalExpr(frame, b) else av
-        | COr(a, b) -> let av = this.EvalExpr(frame, a) in if av.IsTruthy then av else this.EvalExpr(frame, b)
-        | CCall(f, args) -> firstOrNil (this.EvalCall(frame, f, args))
-        | CMethod(o, m, args) -> firstOrNil (this.EvalMethod(frame, o, m, args))
-        | CFunc proto -> this.MakeClosure(frame, proto)
-        | CTable fields -> this.MakeTable(frame, fields)
-
-    member this.EvalCall(frame: Frame, fexpr: CExpr, args: CExpr[]) : Value[] =
-        let f = this.EvalExpr(frame, fexpr)
-        this.Call(f, this.EvalArgs(frame, args))
-
-    member this.EvalMethod(frame: Frame, oexpr: CExpr, m: string, args: CExpr[]) : Value[] =
-        let self = this.EvalExpr(frame, oexpr)
-        let f = this.Index(self, Value.str m)
-        let rest = this.EvalArgs(frame, args)
-        let a = Array.zeroCreate (rest.Length + 1)
-        a.[0] <- self
-        Array.blit rest 0 a 1 rest.Length
-        this.Call(f, a)
-
-    /// Evaluate an expression list, expanding a trailing call/method/vararg.
-    member this.EvalArgs(frame: Frame, args: CExpr[]) : Value[] =
-        let n = args.Length
-        if n = 0 then emptyValues
-        else
-            match args.[n - 1] with
-            | (CCall _ | CMethod _ | CVararg) as last ->
-                let buf = ResizeArray(n + 2)
-                for i in 0 .. n - 2 do buf.Add(this.EvalExpr(frame, args.[i]))
-                this.EvalMultiInto(frame, last, buf)
-                buf.ToArray()
-            | _ ->
-                let arr = Array.zeroCreate n
-                for i in 0 .. n - 1 do arr.[i] <- this.EvalExpr(frame, args.[i])
-                arr
-
-    member this.EvalMultiInto(frame: Frame, e: CExpr, buf: ResizeArray<Value>) : unit =
-        match e with
-        | CCall(f, a) -> buf.AddRange(this.EvalCall(frame, f, a))
-        | CMethod(o, m, a) -> buf.AddRange(this.EvalMethod(frame, o, m, a))
-        | CVararg -> buf.AddRange(frame.Varargs)
-        | _ -> buf.Add(this.EvalExpr(frame, e))
-
-    member this.MakeTable(frame: Frame, fields: CField[]) : Value =
-        let t = LuaTable()
-        let mutable ai = 1L
-        let n = fields.Length
-        for i in 0 .. n - 1 do
-            match fields.[i] with
-            | CFKeyed(k, v) -> t.Set(this.EvalExpr(frame, k), this.EvalExpr(frame, v))
-            | CFPos e ->
-                match e with
-                | (CCall _ | CMethod _ | CVararg) when i = n - 1 ->
-                    let buf = ResizeArray()
-                    this.EvalMultiInto(frame, e, buf)
-                    for v in buf do
-                        t.Set(Value.int ai, v)
-                        ai <- ai + 1L
-                | _ ->
-                    t.Set(Value.int ai, this.EvalExpr(frame, e))
-                    ai <- ai + 1L
-        tableVal t
-
-    member this.EvalExprAsync(frame: Frame, e: CExpr, ct: CancellationToken) : Task<Value> = task {
-        match e with
-        | CConst v -> return v
-        | CLocal lr -> return if lr.IsCell then frame.Cells.[lr.Index].Value else frame.Slots.[lr.Index]
-        | CUpval u -> return frame.Upvals.[u.UIndex].Value
-        | CGlobal n -> return globals.Get(Value.str n)
-        | CVararg -> return if frame.Varargs.Length > 0 then frame.Varargs.[0] else Value.Nil
-        | CParen x -> return! this.EvalExprAsync(frame, x, ct)
-        | CIndex(o, k) ->
-            let! ov = this.EvalExprAsync(frame, o, ct)
-            let! kv = this.EvalExprAsync(frame, k, ct)
-            return this.Index(ov, kv)
-        | CUnary(op, x) ->
-            let! xv = this.EvalExprAsync(frame, x, ct)
-            return this.Unary(op, xv)
-        | CBinary(op, a, b) ->
-            let! av = this.EvalExprAsync(frame, a, ct)
-            let! bv = this.EvalExprAsync(frame, b, ct)
-            return this.BinOp(op, av, bv)
-        | CAnd(a, b) ->
-            let! av = this.EvalExprAsync(frame, a, ct)
-            if av.IsTruthy then return! this.EvalExprAsync(frame, b, ct) else return av
-        | COr(a, b) ->
-            let! av = this.EvalExprAsync(frame, a, ct)
-            if av.IsTruthy then return av else return! this.EvalExprAsync(frame, b, ct)
-        | CCall(f, args) ->
-            let! values = this.EvalCallAsync(frame, f, args, ct)
-            return firstOrNil values
-        | CMethod(o, m, args) ->
-            let! values = this.EvalMethodAsync(frame, o, m, args, ct)
-            return firstOrNil values
-        | CFunc proto -> return this.MakeClosure(frame, proto)
-        | CTable fields -> return! this.MakeTableAsync(frame, fields, ct)
-    }
-
-    member this.EvalCallAsync(frame: Frame, fexpr: CExpr, args: CExpr[], ct: CancellationToken) : Task<Value[]> = task {
-        let! f = this.EvalExprAsync(frame, fexpr, ct)
-        let! argValues = this.EvalArgsAsync(frame, args, ct)
-        return! this.CallAsync(f, argValues, ct)
-    }
-
-    member this.EvalMethodAsync(frame: Frame, oexpr: CExpr, m: string, args: CExpr[], ct: CancellationToken) : Task<Value[]> = task {
-        let! self = this.EvalExprAsync(frame, oexpr, ct)
-        let f = this.Index(self, Value.str m)
-        let! rest = this.EvalArgsAsync(frame, args, ct)
-        let a = Array.zeroCreate (rest.Length + 1)
-        a.[0] <- self
-        Array.blit rest 0 a 1 rest.Length
-        return! this.CallAsync(f, a, ct)
-    }
-
-    member this.EvalArgsAsync(frame: Frame, args: CExpr[], ct: CancellationToken) : Task<Value[]> = task {
-        let n = args.Length
-        if n = 0 then
-            return emptyValues
-        else
-            match args.[n - 1] with
-            | (CCall _ | CMethod _ | CVararg) as last ->
-                let buf = ResizeArray(n + 2)
-                for i in 0 .. n - 2 do
-                    let! value = this.EvalExprAsync(frame, args.[i], ct)
-                    buf.Add(value)
-                do! this.EvalMultiIntoAsync(frame, last, buf, ct)
-                return buf.ToArray()
-            | _ ->
-                let arr = Array.zeroCreate n
-                for i in 0 .. n - 1 do
-                    let! value = this.EvalExprAsync(frame, args.[i], ct)
-                    arr.[i] <- value
-                return arr
-    }
-
-    member this.EvalMultiIntoAsync(frame: Frame, e: CExpr, buf: ResizeArray<Value>, ct: CancellationToken) : Task<unit> = task {
-        match e with
-        | CCall(f, a) ->
-            let! values = this.EvalCallAsync(frame, f, a, ct)
-            buf.AddRange(values)
-        | CMethod(o, m, a) ->
-            let! values = this.EvalMethodAsync(frame, o, m, a, ct)
-            buf.AddRange(values)
-        | CVararg ->
-            buf.AddRange(frame.Varargs)
-        | _ ->
-            let! value = this.EvalExprAsync(frame, e, ct)
-            buf.Add(value)
-    }
-
-    member this.MakeTableAsync(frame: Frame, fields: CField[], ct: CancellationToken) : Task<Value> = task {
-        let t = LuaTable()
-        let mutable ai = 1L
-        let n = fields.Length
-        for i in 0 .. n - 1 do
-            match fields.[i] with
-            | CFKeyed(k, v) ->
-                let! key = this.EvalExprAsync(frame, k, ct)
-                let! value = this.EvalExprAsync(frame, v, ct)
-                t.Set(key, value)
-            | CFPos e ->
-                match e with
-                | (CCall _ | CMethod _ | CVararg) when i = n - 1 ->
-                    let buf = ResizeArray()
-                    do! this.EvalMultiIntoAsync(frame, e, buf, ct)
-                    for v in buf do
-                        t.Set(Value.int ai, v)
-                        ai <- ai + 1L
-                | _ ->
-                    let! value = this.EvalExprAsync(frame, e, ct)
-                    t.Set(Value.int ai, value)
-                    ai <- ai + 1L
-        return tableVal t
-    }
-
-    // ---- statement execution ---------------------------------------------
-
-    member this.ExecBlock(frame: Frame, stats: CStat[]) : Flow =
-        let mutable i = 0
-        let mutable flow = Normal
-        let n = stats.Length
-        let mutable running = true
-        while running && i < n do
-            this.Dispatch()
-            flow <- this.ExecStat(frame, stats.[i])
-            (match flow with Normal -> () | _ -> running <- false)
-            i <- i + 1
-        flow
-
-    member this.ExecStat(frame: Frame, s: CStat) : Flow =
-        match s with
-        | CSCall e ->
-            (match e with
-             | CCall(f, a) -> this.EvalCall(frame, f, a) |> ignore
-             | CMethod(o, m, a) -> this.EvalMethod(frame, o, m, a) |> ignore
-             | _ -> this.EvalExpr(frame, e) |> ignore)
-            Normal
-        | CSLocal(targets, exprs) ->
-            let vals = this.EvalArgs(frame, exprs)
-            for i in 0 .. targets.Length - 1 do
-                let v = if i < vals.Length then vals.[i] else Value.Nil
-                let lr = targets.[i]
-                if lr.IsCell then frame.Cells.[lr.Index] <- Cell v
-                else frame.Slots.[lr.Index] <- v
-            Normal
-        | CSAssign(targets, exprs) ->
-            let indices = targets |> Array.map (function
-                | TIndex(o, k) -> Some(this.EvalExpr(frame, o), this.EvalExpr(frame, k))
-                | _ -> None)
-            let vals = this.EvalArgs(frame, exprs)
-            for i in targets.Length - 1 .. -1 .. 0 do
-                let v = if i < vals.Length then vals.[i] else Value.Nil
-                match indices.[i] with
-                | Some(o, k) -> this.SetIndex(o, k, v)
-                | None -> this.AssignTo(frame, targets.[i], v)
-            Normal
-        | CSReturn exprs -> Return(this.EvalArgs(frame, exprs))
-        | CSBreak -> Break
-        | CSDo b -> this.ExecBlock(frame, b)
-        | CSIf(branches, els) ->
-            let mutable i = 0
-            let mutable result = ValueNone
-            while result.IsNone && i < branches.Length do
-                let (c, b) = branches.[i]
-                if (this.EvalExpr(frame, c)).IsTruthy then result <- ValueSome(this.ExecBlock(frame, b))
-                i <- i + 1
-            match result with
-            | ValueSome f -> f
-            | ValueNone -> this.ExecBlock(frame, els)
-        | CSWhile(c, b) ->
-            let mutable flow = Normal
-            let mutable go = true
-            while go && (this.EvalExpr(frame, c)).IsTruthy do
-                this.Dispatch()
-                match this.ExecBlock(frame, b) with
-                | Normal -> ()
-                | Break -> go <- false
-                | r -> flow <- r; go <- false
-            flow
-        | CSRepeat(b, c) ->
-            let mutable flow = Normal
-            let mutable go = true
-            while go do
-                this.Dispatch()
-                match this.ExecBlock(frame, b) with
-                | Normal -> if (this.EvalExpr(frame, c)).IsTruthy then go <- false
-                | Break -> go <- false
-                | r -> flow <- r; go <- false
-            flow
-        | CSNumFor(v, a, b, st, body) -> this.ExecNumFor(frame, v, a, b, st, body)
-        | CSGenFor(vars, exprs, body) -> this.ExecGenFor(frame, vars, exprs, body)
-        | CSLocalFunc(lr, proto) ->
-            if lr.IsCell then
-                let cell = Cell Value.Nil
-                frame.Cells.[lr.Index] <- cell
-                cell.Value <- this.MakeClosure(frame, proto)
-            else
-                frame.Slots.[lr.Index] <- this.MakeClosure(frame, proto)
-            Normal
-
-    member this.ExecBlockAsync(frame: Frame, stats: CStat[], ct: CancellationToken) : Task<Flow> = task {
-        let mutable i = 0
-        let mutable flow = Normal
-        let n = stats.Length
-        let mutable running = true
-        while running && i < n do
-            this.Dispatch(ct)
-            let! next = this.ExecStatAsync(frame, stats.[i], ct)
-            flow <- next
-            match flow with Normal -> () | _ -> running <- false
-            i <- i + 1
-        return flow
-    }
-
-    member this.ExecStatAsync(frame: Frame, s: CStat, ct: CancellationToken) : Task<Flow> = task {
-        match s with
-        | CSCall e ->
-            match e with
-            | CCall(f, a) ->
-                let! _ = this.EvalCallAsync(frame, f, a, ct)
-                return Normal
-            | CMethod(o, m, a) ->
-                let! _ = this.EvalMethodAsync(frame, o, m, a, ct)
-                return Normal
-            | _ ->
-                let! _ = this.EvalExprAsync(frame, e, ct)
-                return Normal
-        | CSLocal(targets, exprs) ->
-            let! vals = this.EvalArgsAsync(frame, exprs, ct)
-            for i in 0 .. targets.Length - 1 do
-                let v = if i < vals.Length then vals.[i] else Value.Nil
-                let lr = targets.[i]
-                if lr.IsCell then frame.Cells.[lr.Index] <- Cell v
-                else frame.Slots.[lr.Index] <- v
-            return Normal
-        | CSAssign(targets, exprs) ->
-            let indices = Array.create targets.Length None
-            for i in 0 .. targets.Length - 1 do
-                match targets.[i] with
-                | TIndex(o, k) ->
-                    let! ov = this.EvalExprAsync(frame, o, ct)
-                    let! kv = this.EvalExprAsync(frame, k, ct)
-                    indices.[i] <- Some(ov, kv)
-                | _ -> ()
-            let! vals = this.EvalArgsAsync(frame, exprs, ct)
-            for i in targets.Length - 1 .. -1 .. 0 do
-                let v = if i < vals.Length then vals.[i] else Value.Nil
-                match indices.[i] with
-                | Some(o, k) -> this.SetIndex(o, k, v)
-                | None -> do! this.AssignToAsync(frame, targets.[i], v, ct)
-            return Normal
-        | CSReturn exprs ->
-            let! vals = this.EvalArgsAsync(frame, exprs, ct)
-            return Return vals
-        | CSBreak -> return Break
-        | CSDo b -> return! this.ExecBlockAsync(frame, b, ct)
-        | CSIf(branches, els) ->
-            let mutable i = 0
-            let mutable result = ValueNone
-            while result.IsNone && i < branches.Length do
-                let (c, b) = branches.[i]
-                let! cv = this.EvalExprAsync(frame, c, ct)
-                if cv.IsTruthy then
-                    let! flow = this.ExecBlockAsync(frame, b, ct)
-                    result <- ValueSome flow
-                i <- i + 1
-            match result with
-            | ValueSome f -> return f
-            | ValueNone -> return! this.ExecBlockAsync(frame, els, ct)
-        | CSWhile(c, b) ->
-            let mutable flow = Normal
-            let mutable go = true
-            while go do
-                this.Dispatch(ct)
-                let! cv = this.EvalExprAsync(frame, c, ct)
-                if not cv.IsTruthy then
-                    go <- false
-                else
-                    let! bodyFlow = this.ExecBlockAsync(frame, b, ct)
-                    match bodyFlow with
-                    | Normal -> ()
-                    | Break -> go <- false
-                    | r -> flow <- r; go <- false
-            return flow
-        | CSRepeat(b, c) ->
-            let mutable flow = Normal
-            let mutable go = true
-            while go do
-                this.Dispatch(ct)
-                let! bodyFlow = this.ExecBlockAsync(frame, b, ct)
-                match bodyFlow with
-                | Normal ->
-                    let! cv = this.EvalExprAsync(frame, c, ct)
-                    if cv.IsTruthy then go <- false
-                | Break -> go <- false
-                | r -> flow <- r; go <- false
-            return flow
-        | CSNumFor(v, a, b, st, body) ->
-            return! this.ExecNumForAsync(frame, v, a, b, st, body, ct)
-        | CSGenFor(vars, exprs, body) ->
-            return! this.ExecGenForAsync(frame, vars, exprs, body, ct)
-        | CSLocalFunc(lr, proto) ->
-            if lr.IsCell then
-                let cell = Cell Value.Nil
-                frame.Cells.[lr.Index] <- cell
-                cell.Value <- this.MakeClosure(frame, proto)
-            else
-                frame.Slots.[lr.Index] <- this.MakeClosure(frame, proto)
-            return Normal
-    }
-
-    member this.AssignTo(frame: Frame, target: CTarget, v: Value) : unit =
-        match target with
-        | TLocal lr -> if lr.IsCell then frame.Cells.[lr.Index].Value <- v else frame.Slots.[lr.Index] <- v
-        | TUpval u -> frame.Upvals.[u.UIndex].Value <- v
-        | TGlobal n -> globals.Set(Value.str n, v)
-        | TIndex(o, k) -> this.SetIndex(this.EvalExpr(frame, o), this.EvalExpr(frame, k), v)
-
-    member this.AssignToAsync(frame: Frame, target: CTarget, v: Value, ct: CancellationToken) : Task<unit> = task {
-        match target with
-        | TLocal lr ->
-            if lr.IsCell then frame.Cells.[lr.Index].Value <- v else frame.Slots.[lr.Index] <- v
-        | TUpval u -> frame.Upvals.[u.UIndex].Value <- v
-        | TGlobal n -> globals.Set(Value.str n, v)
-        | TIndex(o, k) ->
-            let! ov = this.EvalExprAsync(frame, o, ct)
-            let! kv = this.EvalExprAsync(frame, k, ct)
-            this.SetIndex(ov, kv, v)
-    }
-
-    member this.ExecNumFor(frame: Frame, v: LocalRef, ea, eb, es, body) : Flow =
-        let av = this.AsNumber(this.EvalExpr(frame, ea), "'for' initial value")
-        let bv = this.AsNumber(this.EvalExpr(frame, eb), "'for' limit")
-        let sv = this.AsNumber(this.EvalExpr(frame, es), "'for' step")
-        let inline setVar (value: Value) =
-            if v.IsCell then frame.Cells.[v.Index] <- Cell value
-            else frame.Slots.[v.Index] <- value
-        if av.Tag = Tag.Int && sv.Tag = Tag.Int then
-            let start = av.Int
-            let step = sv.Int
-            if step = 0L then luaError "'for' step is zero"
-            let mutable hasIter = true
-            let limit =
-                match bv.Tag with
-                | Tag.Int -> bv.Int
-                | _ ->
-                    let f = bv.Float
-                    if step > 0L then
-                        if f >= 9.2233720368547758e18 then Int64.MaxValue
-                        elif f < -9.2233720368547758e18 then (hasIter <- false; 0L)
-                        else int64 (Math.Floor f)
-                    else
-                        if f <= -9.2233720368547758e18 then Int64.MinValue
-                        elif f > 9.2233720368547758e18 then (hasIter <- false; 0L)
-                        else int64 (Math.Ceiling f)
-            if not hasIter || (step > 0L && start > limit) || (step < 0L && start < limit) then Normal
-            else
-                let count =
-                    if step > 0L then (uint64 (limit - start)) / (uint64 step)
-                    else (uint64 (start - limit)) / (uint64 (-step))
-                let mutable i = start
-                let mutable remaining = count
-                let mutable flow = Normal
-                let mutable go = true
-                while go do
-                    this.Dispatch()
-                    setVar (Value.int i)
-                    match this.ExecBlock(frame, body) with
-                    | Normal ->
-                        if remaining = 0UL then
-                            go <- false
-                        else
-                            remaining <- remaining - 1UL
-                            i <- i + step
-                    | Break -> go <- false
-                    | r -> flow <- r; go <- false
-                flow
-        else
-            let start = this.ToFloat av
-            let limit = this.ToFloat bv
-            let step = this.ToFloat sv
-            if step = 0.0 then luaError "'for' step is zero"
-            let mutable i = start
-            let mutable flow = Normal
-            let mutable go = true
-            while go && ((step > 0.0 && i <= limit) || (step < 0.0 && i >= limit)) do
-                this.Dispatch()
-                setVar (Value.float i)
-                match this.ExecBlock(frame, body) with
-                | Normal -> i <- i + step
-                | Break -> go <- false
-                | r -> flow <- r; go <- false
-            flow
-
-    member this.ExecNumForAsync(frame: Frame, v: LocalRef, ea, eb, es, body, ct: CancellationToken) : Task<Flow> = task {
-        let! avRaw = this.EvalExprAsync(frame, ea, ct)
-        let! bvRaw = this.EvalExprAsync(frame, eb, ct)
-        let! svRaw = this.EvalExprAsync(frame, es, ct)
-        let av = this.AsNumber(avRaw, "'for' initial value")
-        let bv = this.AsNumber(bvRaw, "'for' limit")
-        let sv = this.AsNumber(svRaw, "'for' step")
-        let inline setVar (value: Value) =
-            if v.IsCell then frame.Cells.[v.Index] <- Cell value
-            else frame.Slots.[v.Index] <- value
-        if av.Tag = Tag.Int && sv.Tag = Tag.Int then
-            let start = av.Int
-            let step = sv.Int
-            if step = 0L then luaError "'for' step is zero"
-            let mutable hasIter = true
-            let limit =
-                match bv.Tag with
-                | Tag.Int -> bv.Int
-                | _ ->
-                    let f = bv.Float
-                    if step > 0L then
-                        if f >= 9.2233720368547758e18 then Int64.MaxValue
-                        elif f < -9.2233720368547758e18 then (hasIter <- false; 0L)
-                        else int64 (Math.Floor f)
-                    else
-                        if f <= -9.2233720368547758e18 then Int64.MinValue
-                        elif f > 9.2233720368547758e18 then (hasIter <- false; 0L)
-                        else int64 (Math.Ceiling f)
-            if not hasIter || (step > 0L && start > limit) || (step < 0L && start < limit) then
-                return Normal
-            else
-                let count =
-                    if step > 0L then (uint64 (limit - start)) / (uint64 step)
-                    else (uint64 (start - limit)) / (uint64 (-step))
-                let mutable i = start
-                let mutable remaining = count
-                let mutable flow = Normal
-                let mutable go = true
-                while go do
-                    this.Dispatch(ct)
-                    setVar (Value.int i)
-                    let! bodyFlow = this.ExecBlockAsync(frame, body, ct)
-                    match bodyFlow with
-                    | Normal ->
-                        if remaining = 0UL then
-                            go <- false
-                        else
-                            remaining <- remaining - 1UL
-                            i <- i + step
-                    | Break -> go <- false
-                    | r -> flow <- r; go <- false
-                return flow
-        else
-            let start = this.ToFloat av
-            let limit = this.ToFloat bv
-            let step = this.ToFloat sv
-            if step = 0.0 then luaError "'for' step is zero"
-            let mutable i = start
-            let mutable flow = Normal
-            let mutable go = true
-            while go && ((step > 0.0 && i <= limit) || (step < 0.0 && i >= limit)) do
-                this.Dispatch(ct)
-                setVar (Value.float i)
-                let! bodyFlow = this.ExecBlockAsync(frame, body, ct)
-                match bodyFlow with
-                | Normal -> i <- i + step
-                | Break -> go <- false
-                | r -> flow <- r; go <- false
-            return flow
-    }
-
-    member this.ExecGenFor(frame: Frame, vars: LocalRef[], exprs, body) : Flow =
-        let init = this.EvalArgs(frame, exprs)
-        let f = if init.Length > 0 then init.[0] else Value.Nil
-        let s = if init.Length > 1 then init.[1] else Value.Nil
-        let mutable ctrl = if init.Length > 2 then init.[2] else Value.Nil
-        let mutable flow = Normal
-        let mutable go = true
-        while go do
-            this.Dispatch()
-            let res = this.Call(f, [| s; ctrl |])
-            let first = firstOrNil res
-            if first.IsNil then go <- false
-            else
-                ctrl <- first
-                for i in 0 .. vars.Length - 1 do
-                    let value = if i < res.Length then res.[i] else Value.Nil
-                    let lr = vars.[i]
-                    if lr.IsCell then frame.Cells.[lr.Index] <- Cell value
-                    else frame.Slots.[lr.Index] <- value
-                match this.ExecBlock(frame, body) with
-                | Normal -> ()
-                | Break -> go <- false
-                | r -> flow <- r; go <- false
-        flow
-
-    member this.ExecGenForAsync(frame: Frame, vars: LocalRef[], exprs, body, ct: CancellationToken) : Task<Flow> = task {
-        let! init = this.EvalArgsAsync(frame, exprs, ct)
-        let f = if init.Length > 0 then init.[0] else Value.Nil
-        let s = if init.Length > 1 then init.[1] else Value.Nil
-        let mutable ctrl = if init.Length > 2 then init.[2] else Value.Nil
-        let mutable flow = Normal
-        let mutable go = true
-        while go do
-            this.Dispatch(ct)
-            let! res = this.CallAsync(f, [| s; ctrl |], ct)
-            let first = firstOrNil res
-            if first.IsNil then
-                go <- false
-            else
-                ctrl <- first
-                for i in 0 .. vars.Length - 1 do
-                    let value = if i < res.Length then res.[i] else Value.Nil
-                    let lr = vars.[i]
-                    if lr.IsCell then frame.Cells.[lr.Index] <- Cell value
-                    else frame.Slots.[lr.Index] <- value
-                let! bodyFlow = this.ExecBlockAsync(frame, body, ct)
-                match bodyFlow with
-                | Normal -> ()
-                | Break -> go <- false
-                | r -> flow <- r; go <- false
-        return flow
-    }
-
     // ---- operators --------------------------------------------------------
 
     member _.ToFloat(v: Value) = if v.Tag = Tag.Int then double v.Int else v.Float
@@ -984,7 +332,7 @@ and [<Sealed>] Interp() =
         else firstOrNil (this.Call(h, [| v; v |]))
 
     /// Hot path: both operands integers. Falls back to the full dispatch otherwise.
-    /// Shared by the tree-walker and stack VM (the register VM inlines its own copy).
+    /// (The VM loop inlines its own integer fast paths before calling this.)
     member this.BinOp(op: BinOp, a: Value, b: Value) : Value =
         if a.Tag = Tag.Int && b.Tag = Tag.Int then
             let x = a.Int
@@ -1130,15 +478,5 @@ and [<Sealed>] Interp() =
                 let tn = match nm.Tag with Tag.Str -> nm.Obj :?> string | _ -> "table"
                 sprintf "%s: 0x%08x" tn (RuntimeHelpers.GetHashCode v.Obj)
             | Tag.Func -> sprintf "function: 0x%08x" (RuntimeHelpers.GetHashCode v.Obj)
+            | Tag.Thread -> sprintf "thread: 0x%08x" (RuntimeHelpers.GetHashCode v.Obj)
             | _ -> "userdata"
-
-    // ---- loading / running -----------------------------------------------
-
-    member _.LoadString(src: string, chunkName: string) : Closure =
-        let block = Parser.parseString src chunkName
-        let proto = Compiler.compile block chunkName
-        Closure(proto, emptyCells)
-
-    member this.RunString(src: string, ?chunkName: string) : Value[] =
-        let c = this.LoadString(src, defaultArg chunkName "=(load)")
-        this.CallClosure(c, emptyValues)

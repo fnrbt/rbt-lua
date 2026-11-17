@@ -6,9 +6,7 @@ open Rbt.Lua
 open Rbt.Lua.Runtime
 open Xunit
 
-let private compiled (lua: Lua) source =
-    lua.Interp.LoadString(source, "@pattern-test").Proto
-    |> fun proto -> funcVal (Closure(proto, [||]))
+let private compiled (lua: Lua) source = lua.Load(source, "@pattern-test")
 
 let private expectTrue source =
     let lua = Lua()

@@ -118,3 +118,42 @@ reg TOTAL **−24%** (2599→1792). Overall **~5× → ~3.5× off C Lua**; fib 2
 Net: compute-bound code is ~2.5–3× C Lua; table/call-bound ~5×; we *beat* C Lua on
 string building. Going materially below ~3× would cost disproportionate, abstraction-
 breaking code (unsafe register access, inlined table internals, custom threading).
+
+## Round 8 — single register VM: per-coroutine state, in-VM pcall/error, coroutines
+
+The tree-walker and stack VM are gone. VM state moved from `[<ThreadStatic>]` fields
+onto `Coroutine` objects (growable register stack + frames); one dispatch loop now
+handles Lua→Lua calls, coroutine resume/yield, `pcall`/`xpcall` and `error` without
+host recursion or .NET exceptions. Functions with varargs/captured params and generic
+`for` iterator calls stopped going through `Interp.Call`. Different (slower, noisier)
+machine than earlier rounds, so `before` was re-measured here. Best of 5:
+
+```
+benchmark                 before (reg)    now
+fib(33)                          764.8  511.7
+loop sum 1..30M                  501.4  388.9
+nested loop 6000^2               670.1  429.7
+ackermann(3,8)                   234.4  188.7
+table fill+sum 3M                219.9  216.6
+string concat 300k                23.5   26.5
+sieve 2M                        1126.4  1077.8   (1077-1335 across runs; before also varied)
+OOP vectors 1M                   710.4  606.4
+coroutine gen 1M                     -  179.7
+pcall+error 300k                     -   60.9
+TOTAL (first 8)                 4250.8  3446.3
+```
+
+Effect (one run each): fib −33%, loops −22–36%, ackermann −19%, OOP −15%; first-8 TOTAL
+−19%. Repeat runs of `now` landed between 3.3 and 3.6 s for the first eight. Likely
+sources: plain field access instead of thread-static access on every call/return, and
+one call path for all Lua closures. **KEEP.**
+
+JIT note (cost us a 3x regression mid-round): the loop is one long-running method, so
+it only gets optimized code via on-stack replacement, and the JIT silently declined to
+place a patchpoint when the loop condition was `while isNull result` (F# also drops
+`MethodImplOptions.AggressiveOptimization`). Fixes: a plain `bool` loop condition, and
+the loop now returns and re-enters every 2^16 instructions so call-count tiering
+promotes it regardless of OSR. Verified Tier1 under default, `TieredPGO=0`,
+`TC_OnStackReplacement=0`, `TC_QuickJitForLoops=0`, `TieredCompilation=0`, and with the
+OSR-defeating loop shape deliberately reintroduced (690 ms vs 532 ms normal on the
+30M-iteration loop, vs ~2100 ms without the re-entry).

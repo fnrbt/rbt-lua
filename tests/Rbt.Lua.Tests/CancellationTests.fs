@@ -7,9 +7,7 @@ open Rbt.Lua
 open Rbt.Lua.Runtime
 open Xunit
 
-let private compiled (lua: Lua) source =
-    lua.Interp.LoadString(source, "@cancellation-test").Proto
-    |> fun proto -> funcVal (Closure(proto, [||]))
+let private compiled (lua: Lua) source = lua.Load(source, "@cancellation-test")
 
 [<Theory>]
 [<InlineData("while true do end")>]
@@ -34,34 +32,29 @@ let ``async interpreter cancels running Lua including empty loops and protected 
     Assert.Equal(42L, (lua.Interp.Call(compiled lua "return 42", [||])).[0].Int)
 
 [<Theory>]
-[<InlineData("stack")>]
-[<InlineData("register")>]
-let ``bytecode VMs cancel CPU loops without a host call inside the loop`` backend =
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``cancelled CPU loops leave the interpreter reusable`` asynchronous =
     let lua = Lua()
     use started = new ManualResetEventSlim(false)
     lua.SetGlobal("started", Host.make lua.Interp "started" (fun _ ->
         started.Set()
         [||]))
-    let proto = lua.Interp.LoadString("started(); while true do end", "@bytecode-cancellation").Proto
-    let fn =
-        match backend with
-        | "stack" -> funcVal (StackVM.compile proto)
-        | "register" -> funcVal (RegVM.compile proto)
-        | _ -> invalidArg "backend" backend
+    let fn = compiled lua "started(); while true do end"
+    let followUp = compiled lua "return 42"
     use cts = new CancellationTokenSource()
-    let followUp =
-        lua.Interp.LoadString("return 42", "@bytecode-after-cancel").Proto
-        |> (if backend = "stack" then StackVM.compile >> funcVal else RegVM.compile >> funcVal)
     let mutable recovered = false
     let worker =
         Task.Run(fun () ->
-            try lua.Interp.CallAsync(fn, [||], cts.Token).GetAwaiter().GetResult()
+            try
+                if asynchronous then lua.Interp.CallAsync(fn, [||], cts.Token).GetAwaiter().GetResult()
+                else lua.Interp.Call(fn, [||], cts.Token)
             finally recovered <- (lua.Interp.Call(followUp, [||])).[0].Int = 42L)
     Assert.True(started.Wait(TimeSpan.FromSeconds(3.0)), "Lua did not start")
     cts.Cancel()
     Assert.Same(worker :> Task, Task.WhenAny(worker, Task.Delay(TimeSpan.FromSeconds(3.0))).GetAwaiter().GetResult())
     Assert.ThrowsAny<OperationCanceledException>(fun () -> worker.GetAwaiter().GetResult() |> ignore) |> ignore
-    Assert.True(recovered, "Cancelled bytecode left the VM unusable")
+    Assert.True(recovered, "Cancelled execution left the VM unusable")
 
 [<Fact>]
 let ``synchronous calls honor their cancellation token inside protected Lua`` () =

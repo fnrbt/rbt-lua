@@ -5,25 +5,17 @@ open Rbt.Lua
 open Rbt.Lua.Runtime
 open Xunit
 
-let private run backend asynchronous source =
+let private run asynchronous source =
     let lua = Lua()
-    let proto = lua.Interp.LoadString(source, "@language-regression").Proto
-    let fn =
-        match backend with
-        | "tree" -> funcVal (Closure(proto, [||]))
-        | "stack" -> funcVal (StackVM.compile proto)
-        | "register" -> funcVal (RegVM.compile proto)
-        | _ -> invalidArg "backend" backend
+    let fn = lua.Load(source, "@language-regression")
     if asynchronous then lua.Interp.CallAsync(fn, [||], CancellationToken.None).GetAwaiter().GetResult()
     else lua.Interp.Call(fn, [||])
 
 [<Theory>]
-[<InlineData("tree", false)>]
-[<InlineData("tree", true)>]
-[<InlineData("stack", false)>]
-[<InlineData("register", false)>]
-let ``indexed assignment captures operands before RHS and stores`` backend asynchronous =
-    let result = run backend asynchronous """
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``indexed assignment captures operands before RHS and stores`` asynchronous =
+    let result = run asynchronous """
         local a, b = {}, {}
         local t, k = a, 1
         local function change() t = b; k = 2; return 42 end
@@ -38,12 +30,10 @@ let ``indexed assignment captures operands before RHS and stores`` backend async
     Assert.True(result.[0].IsTruthy)
 
 [<Theory>]
-[<InlineData("tree", false)>]
-[<InlineData("tree", true)>]
-[<InlineData("stack", false)>]
-[<InlineData("register", false)>]
-let ``integer arithmetic and mixed numeric ordering preserve boundaries`` backend asynchronous =
-    let result = run backend asynchronous """
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``integer arithmetic and mixed numeric ordering preserve boundaries`` asynchronous =
+    let result = run asynchronous """
         local min = math.mininteger
         local max = math.maxinteger
         local nan = 0.0 / 0.0
@@ -57,20 +47,17 @@ let ``integer arithmetic and mixed numeric ordering preserve boundaries`` backen
     """
     Assert.True(result.[0].IsTruthy)
 
-[<Theory>]
-[<InlineData("tree")>]
-[<InlineData("stack")>]
-[<InlineData("register")>]
-let ``left immediate addition preserves metamethod argument order`` backend =
-    let result = run backend false """
+[<Fact>]
+let ``left immediate addition preserves metamethod argument order`` () =
+    let result = run false """
         local t = setmetatable({}, {__add = function(a, b) return type(a) == 'number' and type(b) == 'table' end})
         return 1 + t
     """
     Assert.True(result.[0].IsTruthy)
 
 [<Fact>]
-let ``breaking stack for loops removes their control values`` () =
-    let result = run "stack" false """
+let ``breaking nested for loops leaves enclosing loops intact`` () =
+    let result = run false """
         local n = 0
         for i = 1, 4 do
           for j = 1, 2 do break end
@@ -93,6 +80,6 @@ let ``breaking stack for loops removes their control values`` () =
 let ``unsupported attributes and malformed numbers report syntax errors`` source =
     let lua = Lua()
     let mutable syntaxError = false
-    try lua.Interp.LoadString(source, "@invalid") |> ignore
+    try lua.Load(source, "@invalid") |> ignore
     with LuaSyntaxError _ -> syntaxError <- true
     Assert.True(syntaxError)

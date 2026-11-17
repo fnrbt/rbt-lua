@@ -1,30 +1,31 @@
 namespace Rbt.Lua
 
+open System.Threading
+open System.Threading.Tasks
+
 /// Public entry point: a Lua state with the standard library installed.
 [<Sealed>]
 type Lua() =
     let interp = Interp()
     do StdLib.install interp
 
-    /// The underlying interpreter (tree-walking backend).
+    /// The underlying interpreter (runtime semantics, calls, metatables).
     member _.Interp = interp
     member _.Globals = interp.Globals
 
-    /// Compile and run a chunk on the tree-walking backend, returning all results.
-    member _.DoString(src: string, ?chunkName: string) : Value[] =
-        interp.RunString(src, defaultArg chunkName "=(load)")
-
-    /// Run a chunk on the stack-based bytecode backend.
-    member _.DoStringStack(src: string, ?chunkName: string) : Value[] =
+    /// Compile a chunk into a callable Lua function without running it.
+    member _.Load(src: string, ?chunkName: string) : Value =
         let name = defaultArg chunkName "=(load)"
         let proto = Compiler.compile (Parser.parseString src name) name
-        (StackVM.compile proto :> ICallable).Invoke(interp, emptyValues)
+        funcVal (RegVM.compile proto)
 
-    /// Run a chunk on the register-based bytecode backend.
-    member _.DoStringReg(src: string, ?chunkName: string) : Value[] =
-        let name = defaultArg chunkName "=(load)"
-        let proto = Compiler.compile (Parser.parseString src name) name
-        (RegVM.compile proto :> ICallable).Invoke(interp, emptyValues)
+    /// Compile and run a chunk, returning all of its results.
+    member this.DoString(src: string, ?chunkName: string) : Value[] =
+        interp.Call(this.Load(src, defaultArg chunkName "=(load)"), emptyValues)
+
+    /// Compile and run a chunk that may await async host functions.
+    member this.DoStringAsync(src: string, ?chunkName: string, ?ct: CancellationToken) : Task<Value[]> =
+        interp.CallAsync(this.Load(src, defaultArg chunkName "=(load)"), emptyValues, defaultArg ct CancellationToken.None)
 
     /// Run a chunk and return only its first result (nil if none).
     member this.Eval(src: string, ?chunkName: string) : Value =

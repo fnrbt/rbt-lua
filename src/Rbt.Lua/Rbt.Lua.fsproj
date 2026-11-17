@@ -16,8 +16,8 @@
     <Compile Include="Lexer.fs" />
     <Compile Include="Parser.fs" />
     <Compile Include="Compiler.fs" />
+    <Compile Include="Bytecode.fs" />
     <Compile Include="Interp.fs" />
-    <Compile Include="StackVM.fs" />
     <Compile Include="RegVM.fs" />
     <Compile Include="Pattern.fs" />
     <Compile Include="Format.fs" />

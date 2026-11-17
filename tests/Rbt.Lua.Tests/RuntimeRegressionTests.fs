@@ -8,8 +8,7 @@ open Xunit
 
 let private run source =
     let lua = Lua()
-    let proto = lua.Interp.LoadString(source, "@runtime-regression").Proto
-    lua.Interp.Call(funcVal (Closure(proto, [||])), [||])
+    lua.Interp.Call(lua.Load(source, "@runtime-regression"), [||])
 
 let private expectTrue source =
     for result in run source do
