@@ -131,3 +131,47 @@ let ``host Pairs enumerates array then hash entries without disturbing Lua trave
     Assert.Equal(3, t.Pairs() |> Seq.length)
     let k, _ = t.Next(Value.Nil)
     Assert.Equal("1", Numbers.toString k)
+
+[<Fact>]
+let ``hash part keeps keys of every type distinct and reusable`` () =
+    expectTrue """
+        local t, f, tk = {}, function() end, {}
+        t[-1] = 'neg'; t[math.mininteger] = 'min'; t[0] = 'zero'; t[2^53] = 'big'
+        t[1.5] = 'float'; t[true] = 'yes'; t[false] = 'no'; t[f] = 'fn'; t[tk] = 'tbl'; t['s'] = 'str'
+        local ok = t[-1] == 'neg' and t[math.mininteger] == 'min' and t[0] == 'zero' and t[2^53] == 'big'
+          and t[1.5] == 'float' and t[true] == 'yes' and t[false] == 'no' and t[f] == 'fn'
+          and t[tk] == 'tbl' and t.s == 'str' and t[0.0] == 'zero' and t[-1.0] == 'neg'
+        t[-1] = nil; t[-1] = 'again'
+        local n = 0
+        for k, v in pairs(t) do n = n + 1 end
+        return ok, t[-1] == 'again', n == 10
+    """
+
+[<Fact>]
+let ``hash part compacts under insert and delete churn`` () =
+    expectTrue """
+        local q, head = {}, 0
+        for i = 1, 100000 do
+          q['k' .. i] = i
+          if i > 10 then q['k' .. (i - 10)] = nil end
+        end
+        local n, sum = 0, 0
+        for k, v in pairs(q) do n = n + 1; sum = sum + v end
+        local strided = {}
+        for i = 1, 4096 do strided[i * 1024] = i end
+        local all = true
+        for i = 1, 4096 do all = all and strided[i * 1024] == i end
+        return n == 10 and sum == (99991 + 100000) * 10 / 2, all
+    """
+
+[<Fact>]
+let ``sparse integer keys migrate into the array part when the gap fills`` () =
+    expectTrue """
+        local t = {}
+        for i = 2, 100 do t[i] = i end
+        local before = #t
+        t[1] = 1
+        local s = 0
+        for i, v in ipairs(t) do s = s + v end
+        return (before == 0 or before == 100), #t == 100, s == 5050
+    """

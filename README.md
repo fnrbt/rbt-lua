@@ -93,10 +93,10 @@ local attributes are rejected with a syntax error rather than silently ignored.)
 
 Numeric comparisons preserve integer precision when mixed with floats, including
 64-bit boundaries. Indexed assignment captures targets before evaluating the RHS.
-`next` supports clearing existing keys during traversal without rescanning the table
-from the beginning for every key. Deleted hash cursors may remain allocated until
-the traversal completes or restarts; abandoning a traversal can retain them until
-the next traversal.
+Tables have an array part and a hash part; the hash part stores keys and values
+inline in an insertion-ordered node array. `next` supports clearing existing keys
+during traversal: a cleared key stays as a dead node until the hash part next
+resizes, so no per-traversal state is kept.
 
 Regression coverage includes these semantics in sync and async execution, coroutines,
 protected errors, async host calls, table mutation boundaries, patterns, numeric
@@ -131,9 +131,6 @@ Remaining items:
 * **String compatibility:** byte-accurate non-ASCII strings and Lua character-class
   behavior remain incomplete; the pattern rewrite retains the current character
   representation.
-* **Table traversal retention:** an abandoned traversal can retain deleted hash
-  cursors until a later traversal. Reclamation without invalidating permitted
-  deletion-during-iteration needs further design.
 * **Language coverage:** `<const>`/`<close>` remain explicitly rejected; `goto`/labels
   and full `_ENV` remain unsupported.
 * **Remaining C-call boundaries:** metamethods (`__index` functions, `__add`, …) and

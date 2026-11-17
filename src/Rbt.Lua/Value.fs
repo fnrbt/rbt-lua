@@ -104,64 +104,99 @@ module Value =
 
 // ---------------------------------------------------------------------------
 
-[<AllowNullLiteral>]
-type private HashEntry(key: Value, value: Value) =
-    member _.Key = key
-    member val Value = value with get, set
-    member val Next : HashEntry = null with get, set
-    member val Prev : HashEntry = null with get, set
+/// One hash-part slot: key and value stored inline. `Next` chains slots that
+/// share a bucket (index into the node array, -1 = end).
+[<Struct; NoEquality; NoComparison>]
+type internal Node =
+    val mutable Key: Value
+    val mutable Val: Value
+    val mutable Hash: int
+    val mutable Next: int
 
-/// A Lua table: a hybrid of a dense array part (1-based contiguous integer keys)
-/// and a hash part for everything else, plus an optional metatable.
-[<AllowNullLiteral>]
-type LuaTable() =
-    // Array part holds keys 1..Count at indices 0..Count-1.
+/// A Lua table: a dense array part (keys 1..n) plus a hash part, and an
+/// optional metatable.
+///
+/// The hash part is a compact node array in insertion order with an `int[]`
+/// bucket index (open hashing by chains through `Node.Next`). A small table is
+/// three allocations and lookups never touch a per-key object. Removing a key
+/// leaves a dead node (nil value, key kept) until the next resize, so `next`
+/// can continue from a key cleared during traversal without any traversal state.
+and [<AllowNullLiteral>] LuaTable() =
+    // Array part holds keys 1..acount at indices 0..acount-1.
     let mutable arr : Value[] = Array.empty
     let mutable acount = 0
-    let mutable hash : Dictionary<Value, HashEntry> = null
-    let mutable first : HashEntry = null
-    let mutable last : HashEntry = null
+    // Highest array count reached; `next` accepts integer keys up to here after
+    // the array part shrinks during traversal.
     let mutable arrayHighWater = 0
-    let mutable traversing = false
-    let mutable removed : ResizeArray<HashEntry> = null
+    let mutable nodes : Node[] = null     // used slots: [0, used)
+    let mutable buckets : int[] = null    // node index + 1; 0 = empty
+    let mutable used = 0
+    let mutable live = 0
+    // Bucket count is odd (capacity + 1) and reduced with a multiply-based
+    // modulus: sequential integer keys stay in sequential buckets (cache
+    // friendly), while power-of-two strides still spread across buckets.
+    let mutable divisor = 1u
+    let mutable fastModMul = 0UL
     member val Metatable : LuaTable = null with get, set
 
-    member private _.EnsureHash() =
-        if isNull hash then hash <- Dictionary<Value, HashEntry>()
-        hash
+    static member inline private KeyEq(a: Value, b: Value) =
+        a.Tag = b.Tag &&
+        (match a.Tag with
+         | Tag.Int -> a.Int = b.Int
+         | Tag.Float -> a.Num = b.Num
+         | Tag.Str -> obj.ReferenceEquals(a.Obj, b.Obj) || String.Equals(a.Obj :?> string, b.Obj :?> string)
+         | _ -> obj.ReferenceEquals(a.Obj, b.Obj))
 
-    member private _.Unlink(entry: HashEntry) =
-        if isNull entry.Prev then first <- entry.Next else entry.Prev.Next <- entry.Next
-        if isNull entry.Next then last <- entry.Prev else entry.Next.Prev <- entry.Prev
+    member inline private _.Bucket(hash: int) =
+        int (uint32 ((((fastModMul * uint64 (uint32 hash)) >>> 32) + 1UL) * uint64 divisor >>> 32))
 
-    member private _.MarkRemoved(entry: HashEntry) =
-        if not entry.Value.IsNil then
-            entry.Value <- Value.Nil
-            if isNull removed then removed <- ResizeArray()
-            removed.Add entry
+    /// Index of the node holding `key` (live or dead), or -1.
+    member private this.Find(key: Value) : int =
+        if isNull nodes then -1
+        else
+            let h = key.GetHashCode()
+            let mutable i = buckets.[this.Bucket h] - 1
+            while i >= 0 && not (nodes.[i].Hash = h && LuaTable.KeyEq(nodes.[i].Key, key)) do
+                i <- nodes.[i].Next
+            i
 
-    member private this.ClearRemoved() =
-        if not (isNull removed) then
-            for entry in removed do
-                if entry.Value.IsNil then
-                    let mutable current = Unchecked.defaultof<HashEntry>
-                    if hash.TryGetValue(entry.Key, &current) && obj.ReferenceEquals(entry, current) then
-                        hash.Remove entry.Key |> ignore
-                        this.Unlink entry
-            removed.Clear()
+    /// Rebuild the hash part with room for at least `minLive` keys, dropping dead nodes.
+    member private this.Resize(minLive: int) =
+        let mutable cap = 2
+        while cap < minLive do cap <- cap * 2
+        let old = nodes
+        let oldUsed = used
+        nodes <- Array.zeroCreate cap
+        buckets <- Array.zeroCreate (cap + 1)
+        divisor <- uint32 (cap + 1)
+        fastModMul <- UInt64.MaxValue / uint64 divisor + 1UL
+        used <- 0
+        live <- 0
+        if not (isNull old) then
+            for i in 0 .. oldUsed - 1 do
+                if not old.[i].Val.IsNil then this.Append(old.[i].Key, old.[i].Val, old.[i].Hash)
+
+    member private this.Append(key: Value, value: Value, h: int) =
+        let i = used
+        let b = this.Bucket h
+        nodes.[i].Key <- key
+        nodes.[i].Val <- value
+        nodes.[i].Hash <- h
+        nodes.[i].Next <- buckets.[b] - 1
+        buckets.[b] <- i + 1
+        used <- i + 1
+        live <- live + 1
 
     member private this.SetHash(key: Value, value: Value) =
-        if not (isNull hash) && hash.ContainsKey key then
-            let entry = hash.[key]
-            if value.IsNil && not traversing then
-                hash.Remove key |> ignore
-                this.Unlink entry
-            else if value.IsNil then this.MarkRemoved entry else entry.Value <- value
+        let i = this.Find key
+        if i >= 0 then
+            let wasLive = not nodes.[i].Val.IsNil
+            nodes.[i].Val <- value
+            if wasLive && value.IsNil then live <- live - 1
+            elif not wasLive && not value.IsNil then live <- live + 1
         elif not value.IsNil then
-            let entry = HashEntry(key, value)
-            if isNull last then first <- entry else (last.Next <- entry; entry.Prev <- last)
-            last <- entry
-            (this.EnsureHash()).Add(key, entry)
+            if isNull nodes || used = nodes.Length then this.Resize(live + 1)
+            this.Append(key, value, key.GetHashCode())
 
     /// Normalize integral floats only when their exact value fits a Lua integer.
     static member inline private NormKey(k: Value) =
@@ -173,19 +208,16 @@ type LuaTable() =
 
     /// Pull contiguous successors from the hash part into the array part after an append.
     member private this.Migrate() =
-        if not (isNull hash) then
-            let mutable next = Value.int (int64 acount + 1L)
-            let mutable entry = Unchecked.defaultof<HashEntry>
-            while hash.TryGetValue(next, &entry) && not entry.Value.IsNil do
-                let value = entry.Value
-                if traversing then this.MarkRemoved entry
-                else
-                    hash.Remove next |> ignore
-                    this.Unlink entry
-                this.Append value
-                next <- Value.int (int64 acount + 1L)
+        if live > 0 then
+            let mutable i = this.Find(Value.int (int64 acount + 1L))
+            while i >= 0 && not nodes.[i].Val.IsNil do
+                let v = nodes.[i].Val
+                nodes.[i].Val <- Value.Nil
+                live <- live - 1
+                this.AppendArray v
+                i <- this.Find(Value.int (int64 acount + 1L))
 
-    member private _.Append(v: Value) =
+    member private _.AppendArray(v: Value) =
         if acount = arr.Length then
             let n = if arr.Length = 0 then 4 else arr.Length * 2
             let na = Array.zeroCreate n
@@ -200,14 +232,16 @@ type LuaTable() =
         | Tag.Int ->
             let i = key.Int
             if i >= 1L && i <= int64 acount then arr.[int i - 1]
-            elif isNull hash then Value.Nil
-            else match hash.TryGetValue key with | true, entry -> entry.Value | _ -> Value.Nil
+            else
+                let n = this.Find key
+                if n < 0 then Value.Nil else nodes.[n].Val
         | Tag.Nil -> Value.Nil
         | _ ->
             let k = LuaTable.NormKey key
             if k.Tag = Tag.Int then this.Get k
-            elif isNull hash then Value.Nil
-            else match hash.TryGetValue k with | true, entry -> entry.Value | _ -> Value.Nil
+            else
+                let n = this.Find k
+                if n < 0 then Value.Nil else nodes.[n].Val
 
     member this.GetInt(i: int64) =
         if i >= 1L && i <= int64 acount then arr.[int i - 1]
@@ -226,63 +260,49 @@ type LuaTable() =
                     while n > 0 && arr.[n - 1].IsNil do n <- n - 1
                     acount <- n
             elif i = int64 acount + 1L && not value.IsNil then
-                this.Append value
+                this.AppendArray value
                 this.Migrate()
             else this.SetHash(key, value)
         | Tag.Nil -> raise (LuaError(Value.str "table index is nil"))
         | Tag.Float when Double.IsNaN key.Num -> raise (LuaError(Value.str "table index is NaN"))
-        | _ ->
-            this.SetHash(key, value)
+        | _ -> this.SetHash(key, value)
 
     /// The border `#t`: length of the array part (a valid Lua border).
     member _.Length = int64 acount
 
     /// Host-side enumeration: array part, then hash part in insertion order.
-    /// Unlike `Next`, it does not touch Lua traversal state, so a host may stop
-    /// early without affecting a Lua `next`/`pairs` loop. Entries cleared during
-    /// a Lua traversal are skipped.
+    /// Independent of Lua `next`, so a host may stop early.
     member _.Pairs() : seq<Value * Value> =
         seq {
             for i in 0 .. acount - 1 do
                 if not arr.[i].IsNil then yield Value.int (int64 i + 1L), arr.[i]
-            let mutable entry = first
-            while not (isNull entry) do
-                if not entry.Value.IsNil then yield entry.Key, entry.Value
-                entry <- entry.Next
+            let mutable i = 0
+            while not (isNull nodes) && i < used do
+                if not nodes.[i].Val.IsNil then yield nodes.[i].Key, nodes.[i].Val
+                i <- i + 1
         }
 
-    /// Find the successor without restarting an enumeration. Deleted hash entries
-    /// remain as traversal cursors until the next pass starts.
+    /// The successor of `key` in traversal order: array part, then hash nodes.
     member this.Next(key: Value) : Value * Value =
         let key = LuaTable.NormKey key
-        if key.IsNil then
-            this.ClearRemoved()
-            traversing <- true
-        let mutable index = -1
-        let mutable entry = first
+        let mutable ai = 0
+        let mutable ni = 0
         if not key.IsNil then
-            if key.Tag = Tag.Int && key.Int >= 1L && key.Int <= int64 arrayHighWater &&
-               (isNull hash || not (hash.ContainsKey key) ||
-                (key.Int <= int64 acount && not arr.[int key.Int - 1].IsNil)) then
-                index <- int key.Int - 1
-            elif not (isNull hash) then
-                match hash.TryGetValue key with
-                | true, found -> entry <- found.Next
-                | _ -> raise (LuaError(Value.str "invalid key to 'next'"))
-            else raise (LuaError(Value.str "invalid key to 'next'"))
-        let mutable result = Value.Nil, Value.Nil
-        if index >= 0 || key.IsNil then
-            let mutable i = index + 1
-            while i < acount && arr.[i].IsNil do i <- i + 1
-            if i < acount then result <- Value.int (int64 i + 1L), arr.[i]
-        if (fst result).IsNil then
-            while not (isNull entry) && entry.Value.IsNil do entry <- entry.Next
-            if not (isNull entry) then result <- entry.Key, entry.Value
+            if key.Tag = Tag.Int && key.Int >= 1L && key.Int <= int64 acount then ai <- int key.Int
             else
-                traversing <- false
-                this.ClearRemoved()
-        result
-
+                let n = this.Find key
+                if n >= 0 then
+                    ai <- acount
+                    ni <- n + 1
+                elif key.Tag = Tag.Int && key.Int >= 1L && key.Int <= int64 arrayHighWater then
+                    ai <- int key.Int
+                else raise (LuaError(Value.str "invalid key to 'next'"))
+        while ai < acount && arr.[ai].IsNil do ai <- ai + 1
+        if ai < acount then Value.int (int64 ai + 1L), arr.[ai]
+        else
+            while ni < used && nodes.[ni].Val.IsNil do ni <- ni + 1
+            if ni < used then nodes.[ni].Key, nodes.[ni].Val
+            else Value.Nil, Value.Nil
 
     member _.ArrayCount = acount
 
