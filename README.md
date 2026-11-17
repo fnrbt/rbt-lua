@@ -1,55 +1,34 @@
 # fslua
 
-A Lua 5.4 interpreter written in F#, built to be **more succinct and more performant**
-than [MoonSharp](https://www.moonsharp.org/) (the reference C# Lua implementation used
-here as the yardstick).
+A Lua 5.4 interpreter for .NET, written in F#. Lua source is compiled to a
+register-based bytecode modeled on the reference Lua VM (register windows,
+three-operand instructions, an explicit frame stack per coroutine) and run by a
+single dispatch loop.
 
-It runs on a single **register-based bytecode VM** modeled on the real Lua 5.x VM: flat
-register windows, three-operand instructions, and an explicit frame stack per coroutine.
-(Earlier versions also carried a tree-walker and a stack VM for comparison; the register
-VM won every benchmark by 2-3x, so the others were removed — see `BENCH_LOG.md`.)
+## Performance
 
-## Results (best of 5, .NET 10)
-
-Measured on one machine; `before` is the register VM at the last three-backend revision
-(thread-static stack, host-stack pcall), for a like-for-like comparison of this design.
+A small benchmark suite lives in `bench/` and compares against
+[MoonSharp](https://www.moonsharp.org/) and, when `lua5.4` is on `PATH`, the
+reference C implementation. One run on a development machine (best of 5, ms, .NET 10):
 
 ```
-benchmark                 before (reg)    now
-fib(33)                          764.8  511.7
-loop sum 1..30M                  501.4  388.9
-nested loop 6000^2               670.1  429.7
-ackermann(3,8)                   234.4  188.7
-table fill+sum 3M                219.9  216.6
-string concat 300k                23.5   26.5
-sieve 2M                        1126.4  1077.8   (noisy: 1077-1335 across runs)
-OOP vectors 1M                   710.4  606.4
-coroutine gen 1M                     -  179.7
-pcall+error 300k                     -   60.9
+benchmark               fslua   MoonSharp
+fib(33)                   512        2810
+loop sum 1..30M           389        2918
+nested loop 6000^2        430        3330
+ackermann(3,8)            189         922
+table fill+sum 3M         217        2129
+string concat 300k         27         193
+sieve 2M                 1078        8678
+OOP vectors 1M            606        1107
+coroutine gen 1M          180         393
+pcall+error 300k           61         761
 ```
 
-MoonSharp on the same machine is ~5.8-6.3x slower overall (`rbt vs moon`); the bench
-prints a C Lua column too when `lua5.4` is on `PATH`. `BENCHMARKS.txt` holds the older
-three-backend comparison against C Lua 5.4 from the original benchmark machine.
-
-Call- and loop-heavy code is **allocation-free** (fib, loops: ~0 bytes beyond the state
-itself); remaining allocation is the Lua objects the program creates.
-
-See `BENCH_LOG.md` for the full optimization history and where the remaining gap to C
-Lua lives.
-
-## Elegance
-
-The whole project — front end, runtime, standard library, compiler and VM — is
-**~4,300 lines of F#**:
-
-```
-front end  (lexer / parser / resolver / values)  ~1,350
-runtime + stdlib (semantics, patterns, format)   ~1,570
-register compiler + VM + coroutines              ~1,380
-```
-
-MoonSharp is roughly 30k+ lines of C#.
+Against C Lua 5.4 (measured earlier, on a different machine) fslua is roughly
+3-4x slower overall, with the widest gaps on call- and table-heavy code. Numbers
+vary noticeably between runs; treat them as rough. `BENCH_LOG.md` records the
+optimization history.
 
 ## Architecture
 
